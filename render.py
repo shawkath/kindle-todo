@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """
-Kindle TickTick dashboard renderer (ADHD-friendly "focus" layout).
+Kindle TickTick dashboard renderer: three pages, ADHD-friendly.
 
-Screen, top to bottom:
-    1. DO THIS FIRST  one task, picked for you (missed + high priority first)
-    2. MISSED         overdue tasks, never hidden, with "days late"
-    3. THIS WEEK      remaining tasks due today .. end of week, grouped by day
-    4. footer         counts of what's parked (later / no date) + update time
+    Page 1  Today     Top 3 for today (most important first), the rest of today,
+                      anything still open from yesterday, and the rest of this week
+    Page 2  Missed    every overdue task, grouped by how long ago, never hidden
+    Page 3  Later     next week (by day), later (by month), and tasks with no date
 
-Fetches open tasks from the TickTick Open API, draws a 600x800 grayscale
-image for a Kindle (8th gen), and writes a static "TRMNL-compatible" site
-that the TRMNL KOReader plugin can poll:
+Fetches open tasks from the TickTick Open API, draws three 600x800 grayscale
+images for a Kindle (8th gen), and writes a static "TRMNL-compatible" site:
 
-    site/<DASH_PATH>/api/display      -> JSON {image_url, filename, refresh_rate}
-    site/<DASH_PATH>/screen-<hash>.png
+    site/<DASH_PATH>/api/display   -> JSON {image_url, filename, refresh_rate, pages:[...]}
+    site/<DASH_PATH>/p1-<hash>.png, p2-<hash>.png, p3-<hash>.png
+
+`image_url` is page 1, so the stock TRMNL plugin still works (one page). The
+paging version of the plugin (kindle-plugin/trmnl.koplugin) reads `pages`.
 
 Environment variables
     TICKTICK_TOKEN  TickTick access token (required unless --demo)
@@ -21,14 +22,13 @@ Environment variables
     BASE_URL        e.g. https://username.github.io/kindle-todo  (set by the workflow)
     TZ_NAME         time zone for "today" (default Asia/Kolkata)
     LISTS           optional comma-separated TickTick list names to show
-                    (default: Inbox + all lists)
     WEEK            "calendar" (today .. Sunday, default) or "rolling" (next 7 days)
     REFRESH_SECONDS how often the Kindle should check (default 60)
 
-The image file name is a hash of the picture, and the picture has no clock in it,
-so the Kindle only downloads and redraws when your tasks (or the date) change.
+Image file names are hashes of the pictures, and the pictures have no clock in
+them, so the Kindle only downloads and redraws when something actually changes.
 
-Run `python render.py --demo` to render sample data to preview.png.
+Run `python render.py --demo` to render sample data to preview-1/2/3.png.
 """
 
 import datetime as dt
@@ -71,13 +71,15 @@ F = {
     "head": font("bold", 30),
     "head_sub": font("regular", 17),
     "label": font("bold", 14),
-    "focus": font("bold", 21),
-    "focus_meta": font("regular", 16),
+    "top": font("bold", 23),
+    "num": font("bold", 18),
     "row": font("regular", 21),
     "row_b": font("bold", 21),
     "row_meta": font("semibold", 15),
     "day": font("bold", 14),
     "footer": font("regular", 14),
+    "pager": font("regular", 15),
+    "pager_on": font("bold", 15),
     "big": font("bold", 34),
     "body": font("regular", 20),
 }
@@ -170,63 +172,47 @@ def week_end(today):
     return today + dt.timedelta(days=6 - today.weekday())   # through Sunday
 
 
+def when(i):
+    d, t = i["due"]
+    return (d, t or dt.time(23, 59, 59))
+
+
 def plan(tasks, now):
     today = now.date()
+    yday = today - dt.timedelta(days=1)
     end = week_end(today)
-    items = []
-    for t, list_name in tasks:
-        items.append({"title": " ".join((t.get("title") or "(untitled)").split()),
-                      "list": list_name,
-                      "priority": t.get("priority", 0) or 0,
-                      "due": due_of(t)})
+    next_end = end + dt.timedelta(days=7)
 
-    missed = [i for i in items if i["due"] and i["due"][0] < today]
-    week = [i for i in items if i["due"] and today <= i["due"][0] <= end]
-    later = [i for i in items if i["due"] and i["due"][0] > end]
+    items = [{"title": " ".join((t.get("title") or "(untitled)").split()),
+              "list": list_name,
+              "priority": t.get("priority", 0) or 0,
+              "due": due_of(t)} for t, list_name in tasks]
+    dated = [i for i in items if i["due"]]
+
+    today_all = [i for i in dated if i["due"][0] == today]
+    yesterday = [i for i in dated if i["due"][0] == yday]
+    missed = [i for i in dated if i["due"][0] < today]
+    this_week = [i for i in dated if today < i["due"][0] <= end]
+    next_week = [i for i in dated if end < i["due"][0] <= next_end]
+    later = [i for i in dated if i["due"][0] > next_end]
     undated = [i for i in items if not i["due"]]
 
-    # also treat timed tasks earlier today that have passed as "missed"
-    for i in list(week):
-        d, t = i["due"]
-        if d == today and t and t < (now - dt.timedelta(minutes=30)).time():
-            week.remove(i)
-            missed.append(i)
+    # top 3: most important today, then earliest
+    by_importance = sorted(today_all, key=lambda i: (-i["priority"], when(i)[1]))
+    top3 = by_importance[:3]
+    also_today = sorted(by_importance[3:], key=lambda i: when(i)[1])
 
-    def when(i):
-        d, t = i["due"]
-        return (d, t or dt.time(23, 59, 59))
+    yesterday.sort(key=lambda i: (-i["priority"], when(i)[1]))
+    this_week.sort(key=lambda i: when(i))
+    next_week.sort(key=lambda i: when(i))
+    later.sort(key=lambda i: when(i))
+    missed.sort(key=lambda i: (-i["priority"], when(i)))        # important, then oldest
+    undated.sort(key=lambda i: (-i["priority"], i["title"].lower()))
 
-    # missed: most important first, then the oldest (the ones you keep skipping)
-    # missed: slipped today first (fresh), then most important, then oldest
-    missed.sort(key=lambda i: (when(i)[0] != today, -i["priority"], when(i)))
-    week.sort(key=lambda i: (when(i)[0], when(i)[1], -i["priority"]))   # day, then clock time
-
-    # pick ONE task to start with: today's work wins over old backlog.
-    #   1. anything due today (incl. ones whose time already passed), most important first
-    #   2. else something missed in the last 7 days, most important then most recent
-    #   3. else the most important / most recent missed task
-    #   4. else the next task this week
-    focus = None
-    due_today = [i for i in missed + week if i["due"][0] == today]
-    recent_missed = [i for i in missed if (today - i["due"][0]).days <= 7]
-    by_importance_recent = lambda i: (-i["priority"], -when(i)[0].toordinal(), when(i)[1])
-    if due_today:
-        focus = sorted(due_today, key=lambda i: (-i["priority"], when(i)[1]))[0]
-    elif recent_missed:
-        focus = sorted(recent_missed, key=by_importance_recent)[0]
-    elif missed:
-        focus = sorted(missed, key=by_importance_recent)[0]
-    elif week:
-        focus = week[0]
-    n_missed, n_week = len(missed), len(week)
-    for bucket in (missed, week):
-        if focus in bucket:
-            bucket.remove(focus)
-
-    return {"focus": focus, "missed": missed, "week": week,
-            "n_missed": n_missed, "n_week": n_week,
-            "later": len(later), "undated": len(undated),
-            "total": len(items), "end": end}
+    return {"now": now, "today": today, "end": end,
+            "top3": top3, "also_today": also_today, "n_today": len(today_all),
+            "yesterday": yesterday, "this_week": this_week,
+            "missed": missed, "next_week": next_week, "later": later, "undated": undated}
 
 
 # ---------------------------------------------------------------- drawing helpers
@@ -276,6 +262,42 @@ def clock(t):
     return t.strftime("%I:%M%p").lstrip("0").lower()   # 3:00pm
 
 
+def day_name(day, today):
+    if day == today:
+        return "TODAY"
+    if day == today + dt.timedelta(days=1):
+        return "TOMORROW"
+    return day.strftime("%a %d %b").upper().replace(" 0", " ")
+
+
+# right-hand column text for each kind of list
+def right_today(i, now):
+    t = i["due"][1]
+    if not t:
+        return ""
+    return f"was {clock(t)}" if t < now.time() else clock(t)
+
+
+def right_time(i, now):
+    t = i["due"][1]
+    return clock(t) if t else ""
+
+
+def right_late(i, now):
+    late = (now.date() - i["due"][0]).days
+    return f"{late_label(late)} late"
+
+
+def right_date(i, now):
+    d, t = i["due"]
+    return d.strftime("%d %b").lstrip("0") + (f" {clock(t)}" if t else "")
+
+
+def right_list(i, now):
+    return i["list"]
+
+
+# ---------------------------------------------------------------- building blocks
 def label(d, y, text, inverted=False):
     """Small uppercase section label. Inverted = white on black bar."""
     if inverted:
@@ -297,149 +319,246 @@ def row(d, y, item, right_text, right_bold=False):
     title_f = F["row_b"] if item["priority"] >= 5 else F["row"]
     d.text((x, y + 3), fit(d, item["title"], title_f, W - M - x - rw - 14),
            font=title_f, fill=BLACK)
-    d.text((W - M - rw, y + 9), right_text, font=rf, fill=BLACK if right_bold else MID)
+    if right_text:
+        d.text((W - M - rw, y + 9), right_text, font=rf, fill=BLACK if right_bold else MID)
     return y + ROW
 
 
-# ---------------------------------------------------------------- screens
-def draw_header(d, now, p):
+TOP_ROW = 46
+
+
+def top_row(d, y, n, item, right_text):
+    """Big numbered row for the Top 3."""
+    s = 26
+    d.rectangle((M, y + 8, M + s, y + 8 + s), fill=BLACK)
+    num = str(n)
+    d.text((M + (s - tw(d, num, F["num"])) / 2, y + 9), num, font=F["num"], fill=WHITE)
+    rf = F["row_meta"]
+    rw = tw(d, right_text, rf)
+    x = M + s + 14
+    d.text((x, y + 7), fit(d, item["title"], F["top"], W - M - x - rw - 14), font=F["top"], fill=BLACK)
+    if right_text:
+        d.text((W - M - rw, y + 15), right_text, font=rf, fill=DARK)
+    return y + TOP_ROW
+
+
+def more_line(d, y, text):
+    d.text((M + 28, y + 4), text, font=F["row_meta"], fill=DARK)
+    return y + 28
+
+
+def section(d, y, title, items, now, right_fn, rows, inverted=False, right_bold=False,
+            group_fn=None, more_text="+ {n} more"):
+    """Draw a labelled list with at most `rows` task rows (group headers don't count)."""
+    y = label(d, y, f"{title}  {len(items)}" if items else title, inverted)
+    shown, group = 0, object()
+    for i in items[:rows]:
+        if group_fn:
+            g = group_fn(i)
+            if g != group:
+                group = g
+                d.text((M, y + 4), g, font=F["day"], fill=DARK)
+                d.line((M + tw(d, g, F["day"]) + 10, y + 13, W - M, y + 13), fill=LIGHT, width=1)
+                y += 26
+        y = row(d, y, i, right_fn(i, now), right_bold)
+        shown += 1
+    if len(items) > shown:
+        y = more_line(d, y, more_text.format(n=len(items) - shown))
+    return y + 10
+
+
+def section_height(items, rows, group_fn=None):
+    """Height a section() call will use."""
+    shown = items[:rows]
+    h = 30 + len(shown) * ROW + 10
+    if group_fn:
+        h += len({group_fn(i) for i in shown}) * 26
+    if len(items) > len(shown):
+        h += 28
+    return h
+
+
+def fit_rows(items, space, group_fn=None, min_rows=0):
+    """Largest row count whose section fits in `space`."""
+    best = min(min_rows, len(items))
+    for n in range(len(items) + 1):
+        if section_height(items, n, group_fn) <= space:
+            best = n
+    return best
+
+
+def share_rows(groups, space):
+    """Split `space` between several sections fairly: everyone gets a few rows,
+    then leftovers go to whoever still has tasks, top to bottom.
+    groups = [(items, group_fn), ...]  ->  [rows, ...]"""
+    rows = [0] * len(groups)
+    active = [k for k, (items, _) in enumerate(groups) if items]
+
+    def total():
+        return sum(section_height(groups[k][0], rows[k], groups[k][1]) for k in active)
+
+    changed = True
+    while changed:
+        changed = False
+        for k in active:
+            if rows[k] < len(groups[k][0]):
+                rows[k] += 1
+                if total() > space:
+                    rows[k] -= 1
+                else:
+                    changed = True
+    return rows
+
+
+PAGES = ["Today", "Missed", "Later"]
+
+
+def draw_header(d, now, title, sub=None):
     y = 20
-    d.text((M, y), now.strftime("%A %d %b").replace(" 0", " "), font=F["head"], fill=BLACK)
-    if p is not None:
-        sub = f"{p['n_week']} this week"
-        if p["n_missed"]:
-            sub = f"{p['n_missed']} missed  ·  " + sub
+    d.text((M, y), title, font=F["head"], fill=BLACK)
+    if sub:
         d.text((W - M - tw(d, sub, F["head_sub"]), y + 12), sub, font=F["head_sub"], fill=DARK)
     y += 46
     d.rectangle((M, y, W - M, y + 2), fill=BLACK)
     return y + 14
 
 
-def draw_focus(d, y, item, now):
-    """Compact one-line black bar: DO FIRST | title ........ meta"""
-    # work out the meta + available width first so we know if it needs 2 lines
-    tag = "DO FIRST"
-    tag_w = tw(d, tag, F["label"])
-    x0 = M + 14 + tag_w + 24
-
-    meta = ""
-    if item["due"]:
-        day, t = item["due"]
-        late = (now.date() - day).days
-        if late > 0:
-            meta = f"{late_label(late)} late"
-        elif day == now.date():
-            if t and t < now.time():
-                meta = f"was {clock(t)}"
-            else:
-                meta = clock(t) if t else "today"
+def draw_pager(d, page, counts):
+    """Footer: which page you're on, and what's on the others."""
+    d.line((M, H - 44, W - M, H - 44), fill=LIGHT, width=1)
+    x = M
+    for k, name in enumerate(PAGES):
+        on = k == page
+        txt = name + (f" {counts[k]}" if counts[k] is not None and k else "")
+        r = 5
+        cy = H - 24
+        if on:
+            d.ellipse((x, cy - r, x + 2 * r, cy + r), fill=BLACK)
         else:
-            meta = day.strftime("%a") + (f" {clock(t)}" if t else "")
-    mw = tw(d, meta, F["row_meta"])
-    room = W - M - 14 - mw - 14 - x0
-    lines = [fit(d, item["title"], F["focus"], room)]   # always one line
-    h = 46
-
-    d.rounded_rectangle((M, y, W - M, y + h), radius=8, fill=BLACK)
-    d.text((M + 14, y + 15), tag, font=F["label"], fill=LIGHT)
-    d.line((x0 - 12, y + 12, x0 - 12, y + h - 12), fill=MID, width=1)
-    d.text((W - M - 14 - mw, y + 16), meta, font=F["row_meta"], fill=LIGHT)
-    for n, ln in enumerate(lines):
-        d.text((x0, y + 10 + n * 28), ln, font=F["focus"], fill=WHITE)
-    return y + h + 16
+            d.ellipse((x, cy - r, x + 2 * r, cy + r), outline=MID, width=2)
+        x += 2 * r + 8
+        f = F["pager_on"] if on else F["pager"]
+        d.text((x, cy - 10), txt, font=f, fill=BLACK if on else MID)
+        x += tw(d, txt, f) + 22
+    hint = "tap sides ‹ ›"
+    d.text((W - M - tw(d, hint, F["footer"]), H - 33), hint, font=F["footer"], fill=MID)
 
 
-def draw_missed(d, y, missed, now, max_rows):
-    y = label(d, y, f"MISSED  {len(missed)}", inverted=True)
-    shown = missed[:max_rows]
-    if len(missed) > max_rows:          # make room for the "+N" line
-        shown = missed[:max_rows - 1]
-    for i in shown:
-        late = (now.date() - i["due"][0]).days
-        right = f"{late_label(late)} late" if late > 0 else f"today {clock(i['due'][1])}"
-        y = row(d, y, i, right, right_bold=True)
-    rest = len(missed) - len(shown)
-    if rest:
-        d.text((M + 28, y + 4), f"+ {rest} more missed — open TickTick", font=F["row_meta"], fill=DARK)
-        y += 28
-    return y + 12
+BOTTOM = H - 56   # last usable pixel above the pager
 
 
-def draw_week(d, y, week, now, bottom):
-    today = now.date()
-    y = label(d, y, "THIS WEEK")
-    if not week:
-        d.text((M, y + 2), "Nothing else due this week.", font=F["row"], fill=MID)
-        return y + ROW, 0
-
-    shown, cur_day = 0, None
-    for idx, i in enumerate(week):
-        day, t = i["due"]
-        need = ROW + (26 if day != cur_day else 0)
-        remaining = len(week) - idx
-        if y + need > bottom - (26 if remaining > 1 else 0):
-            break
-        if day != cur_day:
-            cur_day = day
-            name = "TODAY" if day == today else ("TOMORROW" if day == today + dt.timedelta(days=1)
-                                                  else day.strftime("%a %d").upper().replace(" 0", " "))
-            d.text((M, y + 4), name, font=F["day"], fill=DARK)
-            d.line((M + tw(d, name, F["day"]) + 10, y + 13, W - M, y + 13), fill=LIGHT, width=1)
-            y += 26
-        y = row(d, y, i, clock(t) if t else "")
-        shown += 1
-
-    rest = len(week) - shown
-    if rest:
-        d.text((M + 28, y + 4), f"+ {rest} more this week", font=F["row_meta"], fill=DARK)
-        y += 28
-    return y, shown
-
-
-def draw_footer(d, now, p=None):
-    parts = []
-    if p is not None:
-        if p["later"]:
-            parts.append(f"{p['later']} later")
-        if p["undated"]:
-            parts.append(f"{p['undated']} no date")
-    if not parts:
-        parts.append("synced with TickTick")
-    d.line((M, H - 40, W - M, H - 40), fill=LIGHT, width=1)
-    d.text((M, H - 31), "  ·  ".join(parts), font=F["footer"], fill=MID)
-
-
-def render(p, now):
+# ---------------------------------------------------------------- page 1: Today
+def page_today(p):
+    now, today = p["now"], p["today"]
     img = Image.new("L", (W, H), WHITE)
     d = ImageDraw.Draw(img)
-    y = draw_header(d, now, p)
-    bottom = H - 52
+    n_week = len(p["this_week"])
+    y = draw_header(d, now, now.strftime("%A %d %b").replace(" 0", " "),
+                    f"{p['n_today']} today  ·  {n_week} rest of week")
 
-    if not p["focus"]:
-        d.text((M, y + 160), "All clear.", font=F["big"], fill=BLACK)
-        d.text((M, y + 210), "Nothing missed, nothing due this week.", font=F["body"], fill=DARK)
-        draw_footer(d, now, p)
-        return img
+    # Top 3
+    y = label(d, y, "TOP 3 TODAY", inverted=True)
+    if p["top3"]:
+        for n, i in enumerate(p["top3"], 1):
+            y = top_row(d, y, n, i, right_today(i, now))
+    else:
+        d.text((M, y + 4), "Nothing due today.", font=F["row"], fill=MID)
+        y += ROW
+    y += 12
 
-    y = draw_focus(d, y, p["focus"], now)
+    by_day = lambda i: day_name(i["due"][0], today)
+    groups = [(p["also_today"], None), (p["yesterday"], None), (p["this_week"], by_day)]
+    rows = share_rows(groups, BOTTOM - y)
 
-    if p["missed"]:
-        # missed tasks always show. They get at least ~40% of what's left,
-        # plus any space this week's list doesn't need.
-        free = bottom - y - 30 - 30                     # minus both section labels
-        week_need = len(p["week"]) * ROW + len({i["due"][0] for i in p["week"]}) * 26
-        space_rows = max(2, int(free * 0.4) // ROW, (free - week_need - 28) // ROW)
-        y = draw_missed(d, y, p["missed"], now, space_rows)
+    if p["also_today"]:
+        y = section(d, y, "ALSO TODAY", p["also_today"], now, right_today, rows[0])
+    if p["yesterday"]:
+        y = section(d, y, "YESTERDAY", p["yesterday"], now, right_list, rows[1],
+                    right_bold=False, more_text="+ {n} more from yesterday")
+    if p["this_week"]:
+        y = section(d, y, "REST OF THIS WEEK", p["this_week"], now, right_time, rows[2],
+                    group_fn=by_day, more_text="+ {n} more this week")
+    elif not (p["top3"] or p["also_today"] or p["yesterday"]):
+        d.text((M, y + 20), "All clear for this week.", font=F["big"], fill=BLACK)
 
-    draw_week(d, y, p["week"], now, bottom)
-    draw_footer(d, now, p)
+    draw_pager(d, 0, [p["n_today"], len(p["missed"]), len(p["next_week"]) + len(p["later"])])
     return img
+
+
+# ---------------------------------------------------------------- page 2: Missed
+def page_missed(p):
+    now, today = p["now"], p["today"]
+    img = Image.new("L", (W, H), WHITE)
+    d = ImageDraw.Draw(img)
+    missed = p["missed"]
+    y = draw_header(d, now, "Missed", f"{len(missed)} overdue")
+
+    if not missed:
+        d.text((M, y + 160), "Nothing missed.", font=F["big"], fill=BLACK)
+        d.text((M, y + 210), "You're fully caught up.", font=F["body"], fill=DARK)
+    else:
+        def age(i):
+            days = (today - i["due"][0]).days
+            if days <= 1:
+                return 0
+            if days <= 7:
+                return 1
+            if days <= 31:
+                return 2
+            if days <= 92:
+                return 3
+            return 4
+        names = ["YESTERDAY", "THIS PAST WEEK", "THIS PAST MONTH", "1–3 MONTHS AGO", "OLDER THAN 3 MONTHS"]
+        buckets = [[i for i in missed if age(i) == k] for k in range(5)]
+        groups = [(b, None) for b in buckets]
+        rows = share_rows(groups, BOTTOM - y)
+        for k, b in enumerate(buckets):
+            if b:
+                y = section(d, y, names[k], b, now, right_late, rows[k], right_bold=True,
+                            more_text="+ {n} more — open TickTick")
+
+    draw_pager(d, 1, [p["n_today"], len(missed), len(p["next_week"]) + len(p["later"])])
+    return img
+
+
+# ---------------------------------------------------------------- page 3: Later
+def page_later(p):
+    now, today = p["now"], p["today"]
+    img = Image.new("L", (W, H), WHITE)
+    d = ImageDraw.Draw(img)
+    nxt, later, undated = p["next_week"], p["later"], p["undated"]
+    nw_start = p["end"] + dt.timedelta(days=1)
+    title = "Next week & later"
+    y = draw_header(d, now, title, f"from {nw_start.strftime('%a %d %b').replace(' 0', ' ')}")
+
+    by_day = lambda i: day_name(i["due"][0], today)
+    by_month = lambda i: i["due"][0].strftime("%B %Y").upper()
+    groups = [(nxt, by_day), (later, by_month), (undated, None)]
+    rows = share_rows(groups, BOTTOM - y)
+
+    if not (nxt or later or undated):
+        d.text((M, y + 160), "Nothing planned yet.", font=F["big"], fill=BLACK)
+    if nxt:
+        y = section(d, y, "NEXT WEEK", nxt, now, right_time, rows[0], group_fn=by_day,
+                    more_text="+ {n} more next week")
+    if later:
+        y = section(d, y, "LATER", later, now, right_date, rows[1], group_fn=by_month)
+    if undated:
+        y = section(d, y, "NO DATE", undated, now, right_list, rows[2],
+                    more_text="+ {n} more without a date")
+
+    draw_pager(d, 2, [p["n_today"], len(p["missed"]), len(nxt) + len(later)])
+    return img
+
+
+def render_pages(p):
+    return [page_today(p), page_missed(p), page_later(p)]
 
 
 def render_message(now, title, body_lines):
     img = Image.new("L", (W, H), WHITE)
     d = ImageDraw.Draw(img)
-    y = draw_header(d, now, None)
+    y = draw_header(d, now, now.strftime("%A %d %b").replace(" 0", " "))
     d.text((M, y + 120), title, font=F["big"], fill=BLACK)
     yy = y + 175
     for ln in body_lines:
@@ -447,12 +566,15 @@ def render_message(now, title, body_lines):
             d.text((M, yy), sub, font=F["body"], fill=DARK)
             yy += 28
         yy += 8
-    draw_footer(d, now)
     return img
 
 
 # ---------------------------------------------------------------- output
-def write_site(img, base_url, dash_path):
+def write_site(images, base_url, dash_path):
+    """Write one PNG per page plus api/display.
+
+    api/display keeps the original single-screen fields (image_url/filename =
+    page 1) so the stock TRMNL plugin still works; the paging plugin reads `pages`."""
     root = HERE / "site"
     if root.exists():
         shutil.rmtree(root)
@@ -461,19 +583,23 @@ def write_site(img, base_url, dash_path):
     (root / ".nojekyll").write_text("")
     (root / "index.html").write_text("<!doctype html><title>.</title>")
 
-    png = out / "tmp.png"
-    img.save(png, optimize=True)
-    digest = hashlib.sha1(png.read_bytes()).hexdigest()[:12]
-    name = f"screen-{digest}.png"
-    png.rename(out / name)
+    pages = []
+    for k, img in enumerate(images, 1):
+        tmp = out / f"tmp{k}.png"
+        img.save(tmp, optimize=True)
+        digest = hashlib.sha1(tmp.read_bytes()).hexdigest()[:12]
+        name = f"p{k}-{digest}.png"
+        tmp.rename(out / name)
+        pages.append({"image_url": f"{base_url.rstrip('/')}/{dash_path}/{name}", "filename": name})
+        print("wrote", out / name)
 
     payload = {
-        "image_url": f"{base_url.rstrip('/')}/{dash_path}/{name}",
-        "filename": name,
+        "image_url": pages[0]["image_url"],
+        "filename": "-".join(pg["filename"][3:15] for pg in pages) + ".png",
         "refresh_rate": REFRESH,
+        "pages": pages,
     }
     (out / "api" / "display").write_text(json.dumps(payload))
-    print("wrote", out / name)
 
 
 def demo_tasks():
@@ -488,11 +614,14 @@ def demo_tasks():
            ("Call family friend", -331), ("Register documents at office", -331, 5), ("Monthly budgeting", -325, 3),
            ("Migrate email to new workspace", -324), ("Pay electricity bill", -313, 5), ("Eye check-up", -308),
            ("Send posters to designer", -308), ("Renew vehicle insurance", -40, 3), ("Return library books", -9),
-           ("Reply to accountant", -2)]
+           ("Reply to accountant", -1), ("Water the plants", -1)]
     out = [({"title": t[0], "dueDate": at(t[1]), **allday, "priority": (t[2] if len(t) > 2 else 0)}, "Home") for t in old]
     out += [
         ({"title": "Transfer domains to new registrar", "dueDate": at(0, 9, 30), "priority": 3}, "Inbox"),
         ({"title": "Book domain and connect repo", "dueDate": at(0, 15)}, "Inbox"),
+        ({"title": "Review pull request from the team", "dueDate": at(0, 18), "priority": 5}, "Work"),
+        ({"title": "Pay maid salary", "dueDate": at(0), **allday}, "Home"),
+        ({"title": "Gym", "dueDate": at(0, 19, 30)}, "Personal"),
         ({"title": "Call plumber", "dueDate": at(1, 11)}, "Home"),
         ({"title": "Draft sale page copy", "dueDate": at(1, 17), "priority": 3}, "Side projects"),
         ({"title": "Weekly groceries", "dueDate": at(2), **allday}, "Home"),
@@ -509,8 +638,9 @@ def main():
         now = dt.datetime.fromisoformat(sys.argv[sys.argv.index("--now") + 1]).replace(tzinfo=TZ)
 
     if "--demo" in sys.argv:
-        render(plan(demo_tasks(), now), now).save(HERE / "preview.png")
-        print("wrote", HERE / "preview.png")
+        for k, img in enumerate(render_pages(plan(demo_tasks(), now)), 1):
+            img.save(HERE / f"preview-{k}.png")
+            print("wrote", HERE / f"preview-{k}.png")
         return
 
     token = os.environ.get("TICKTICK_TOKEN", "").strip()
@@ -526,20 +656,22 @@ def main():
         sample = next((t.get("dueDate") or t.get("startDate") for t, _ in tasks
                        if t.get("dueDate") or t.get("startDate")), None)
         print(f"sample date format from TickTick: {sample!r}")
-        img = render(plan(tasks, now), now)
+        images = render_pages(plan(tasks, now))
     except TokenError:
         img = render_message(now, "Reconnect TickTick", [
             "Your TickTick access token has expired or was revoked.",
             "Run get-token.ps1 again and update the TICKTICK_TOKEN secret on GitHub.",
         ])
+        images = [img, img, img]
     except Exception as e:
         print("error:", repr(e), file=sys.stderr)
         img = render_message(now, "Couldn't reach TickTick", [
             "Will retry on the next refresh.",
             f"Details: {type(e).__name__}",
         ])
+        images = [img, img, img]
 
-    write_site(img, base_url, dash_path)
+    write_site(images, base_url, dash_path)
 
 
 if __name__ == "__main__":
