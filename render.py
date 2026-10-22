@@ -126,17 +126,39 @@ def fetch_tasks(token, wanted):
 
 
 # ---------------------------------------------------------------- planning
-def due_of(task):
-    """Return (date, time_or_None) in local TZ, or None if no due date."""
-    raw = task.get("dueDate")
+def parse_ts(raw):
+    """Parse TickTick timestamps in any of the shapes it sends:
+    2026-10-22T18:30:00+0000, 2026-10-22T18:30:00.000+0000, ...Z, ...+00:00"""
     if not raw:
         return None
-    try:
-        when = dt.datetime.strptime(raw, "%Y-%m-%dT%H:%M:%S%z")
-    except ValueError:
+    s = str(raw).strip().replace("Z", "+0000")
+    if "." in s:                                   # drop milliseconds
+        head, _, rest = s.partition(".")
+        tz = rest.lstrip("0123456789")
+        s = head + tz
+    if len(s) >= 6 and s[-3] == ":" and s[-6] in "+-":   # +00:00 -> +0000
+        s = s[:-3] + s[-2:]
+    for fmt in ("%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M%z", "%Y-%m-%d"):
+        try:
+            when = dt.datetime.strptime(s, fmt)
+            return when if when.tzinfo else when.replace(tzinfo=TZ)
+        except ValueError:
+            continue
+    print(f"warning: couldn't read date {raw!r}", file=sys.stderr)
+    return None
+
+
+def due_of(task):
+    """Return (date, time_or_None) in local TZ, or None if no date.
+    Uses dueDate, falling back to startDate (TickTick sometimes sets only one)."""
+    when = parse_ts(task.get("dueDate")) or parse_ts(task.get("startDate"))
+    if when is None:
         return None
     if task.get("isAllDay"):
-        tz = ZoneInfo(task.get("timeZone") or str(TZ))
+        try:
+            tz = ZoneInfo(task.get("timeZone") or str(TZ))
+        except Exception:
+            tz = TZ
         return when.astimezone(tz).date(), None
     local = when.astimezone(TZ)
     return local.date(), local.time()
@@ -175,19 +197,25 @@ def plan(tasks, now):
         return (d, t or dt.time(23, 59, 59))
 
     # missed: most important first, then the oldest (the ones you keep skipping)
-    missed.sort(key=lambda i: (-i["priority"], when(i)))
+    # missed: slipped today first (fresh), then most important, then oldest
+    missed.sort(key=lambda i: (when(i)[0] != today, -i["priority"], when(i)))
     week.sort(key=lambda i: (when(i)[0], when(i)[1], -i["priority"]))   # day, then clock time
 
-    # pick ONE task to start with
+    # pick ONE task to start with: today's work wins over old backlog.
+    #   1. anything due today (incl. ones whose time already passed), most important first
+    #   2. else something missed in the last 7 days, most important then most recent
+    #   3. else the most important / most recent missed task
+    #   4. else the next task this week
     focus = None
-    hi_missed = [i for i in missed if i["priority"] >= 3]
-    today_items = [i for i in week if i["due"][0] == today]
-    if hi_missed:
-        focus = hi_missed[0]
-    elif today_items:
-        focus = sorted(today_items, key=lambda i: (-i["priority"], when(i)[1]))[0]
+    due_today = [i for i in missed + week if i["due"][0] == today]
+    recent_missed = [i for i in missed if (today - i["due"][0]).days <= 7]
+    by_importance_recent = lambda i: (-i["priority"], -when(i)[0].toordinal(), when(i)[1])
+    if due_today:
+        focus = sorted(due_today, key=lambda i: (-i["priority"], when(i)[1]))[0]
+    elif recent_missed:
+        focus = sorted(recent_missed, key=by_importance_recent)[0]
     elif missed:
-        focus = missed[0]
+        focus = sorted(missed, key=by_importance_recent)[0]
     elif week:
         focus = week[0]
     n_missed, n_week = len(missed), len(week)
@@ -231,6 +259,17 @@ def wrap(d, s, f, width, max_lines):
         lines = lines[:max_lines]
         lines[-1] = fit(d, lines[-1] + " …", f, width)
     return [fit(d, l, f, width) for l in lines]
+
+
+def late_label(days):
+    """3d, 2w, 4mo, 1y: short enough for a narrow column."""
+    if days < 14:
+        return f"{days}d"
+    if days < 60:
+        return f"{days // 7}w"
+    if days < 365:
+        return f"{days // 30}mo"
+    return f"{days // 365}y"
 
 
 def clock(t):
@@ -288,9 +327,12 @@ def draw_focus(d, y, item, now):
         day, t = item["due"]
         late = (now.date() - day).days
         if late > 0:
-            meta = f"{late}d late"
+            meta = f"{late_label(late)} late"
         elif day == now.date():
-            meta = clock(t) if t else "today"
+            if t and t < now.time():
+                meta = f"was {clock(t)}"
+            else:
+                meta = clock(t) if t else "today"
         else:
             meta = day.strftime("%a") + (f" {clock(t)}" if t else "")
     mw = tw(d, meta, F["row_meta"])
@@ -314,7 +356,7 @@ def draw_missed(d, y, missed, now, max_rows):
         shown = missed[:max_rows - 1]
     for i in shown:
         late = (now.date() - i["due"][0]).days
-        right = f"{late}d late" if late > 0 else f"today {clock(i['due'][1])}"
+        right = f"{late_label(late)} late" if late > 0 else f"today {clock(i['due'][1])}"
         y = row(d, y, i, right, right_bold=True)
     rest = len(missed) - len(shown)
     if rest:
@@ -382,8 +424,11 @@ def render(p, now):
     y = draw_focus(d, y, p["focus"], now)
 
     if p["missed"]:
-        # missed tasks always show, but never take more than ~40% of what's left
-        space_rows = max(2, int((bottom - y) * 0.4) // ROW)
+        # missed tasks always show. They get at least ~40% of what's left,
+        # plus any space this week's list doesn't need.
+        free = bottom - y - 30 - 30                     # minus both section labels
+        week_need = len(p["week"]) * ROW + len({i["due"][0] for i in p["week"]}) * 26
+        space_rows = max(2, int(free * 0.4) // ROW, (free - week_need - 28) // ROW)
         y = draw_missed(d, y, p["missed"], now, space_rows)
 
     draw_week(d, y, p["week"], now, bottom)
@@ -439,23 +484,23 @@ def demo_tasks():
         return t.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+0000")
 
     allday = {"isAllDay": True, "timeZone": "Asia/Kolkata"}
-    return [
-        ({"title": "Send design review notes to the team", "dueDate": at(-3, 18), "priority": 5}, "Work"),
-        ({"title": "Renew vehicle insurance", "dueDate": at(-9), **allday, "priority": 3}, "Personal"),
-        ({"title": "Reply to accountant", "dueDate": at(-1, 11)}, "Inbox"),
-        ({"title": "Return library books", "dueDate": at(-2), **allday}, "Personal"),
-        ({"title": "Book car service", "dueDate": at(0, 10, 30), "priority": 3}, "Personal"),
-        ({"title": "Review wireframes and finalise the dashboard flows", "dueDate": at(0, 21), "priority": 5}, "Work"),
-        ({"title": "Pay electricity bill", "dueDate": at(0), **allday}, "Inbox"),
+    old = [("Book haircut", -380), ("Set up smart-home reminders", -335), ("Submit certificate application", -330),
+           ("Call family friend", -331), ("Register documents at office", -331, 5), ("Monthly budgeting", -325, 3),
+           ("Migrate email to new workspace", -324), ("Pay electricity bill", -313, 5), ("Eye check-up", -308),
+           ("Send posters to designer", -308), ("Renew vehicle insurance", -40, 3), ("Return library books", -9),
+           ("Reply to accountant", -2)]
+    out = [({"title": t[0], "dueDate": at(t[1]), **allday, "priority": (t[2] if len(t) > 2 else 0)}, "Home") for t in old]
+    out += [
+        ({"title": "Transfer domains to new registrar", "dueDate": at(0, 9, 30), "priority": 3}, "Inbox"),
+        ({"title": "Book domain and connect repo", "dueDate": at(0, 15)}, "Inbox"),
         ({"title": "Call plumber", "dueDate": at(1, 11)}, "Home"),
         ({"title": "Draft sale page copy", "dueDate": at(1, 17), "priority": 3}, "Side projects"),
         ({"title": "Weekly groceries", "dueDate": at(2), **allday}, "Home"),
-        ({"title": "Read accessibility study guide ch. 2", "dueDate": at(3, 9)}, "Learning"),
         ({"title": "Plan next week", "dueDate": at(3, 19), "priority": 3}, "Inbox"),
         ({"title": "Dentist appointment", "dueDate": at(9, 10)}, "Personal"),
         ({"title": "Buy printer ink"}, "Inbox"),
-        ({"title": "Back up Kindle notes"}, "Inbox"),
     ]
+    return out
 
 
 def main():
@@ -476,6 +521,11 @@ def main():
 
     try:
         tasks = fetch_tasks(token, os.environ.get("LISTS", ""))
+        dated = sum(1 for t, _ in tasks if due_of(t))
+        print(f"tasks: {len(tasks)} open, {dated} with a date, {len(tasks) - dated} without")
+        sample = next((t.get("dueDate") or t.get("startDate") for t, _ in tasks
+                       if t.get("dueDate") or t.get("startDate")), None)
+        print(f"sample date format from TickTick: {sample!r}")
         img = render(plan(tasks, now), now)
     except TokenError:
         img = render_message(now, "Reconnect TickTick", [
