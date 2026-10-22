@@ -23,7 +23,10 @@ Environment variables
     LISTS           optional comma-separated TickTick list names to show
                     (default: Inbox + all lists)
     WEEK            "calendar" (today .. Sunday, default) or "rolling" (next 7 days)
-    REFRESH_SECONDS how often the Kindle should check (default 1800)
+    REFRESH_SECONDS how often the Kindle should check (default 60)
+
+The image file name is a hash of the picture, and the picture has no clock in it,
+so the Kindle only downloads and redraws when your tasks (or the date) change.
 
 Run `python render.py --demo` to render sample data to preview.png.
 """
@@ -49,7 +52,7 @@ HERE = Path(__file__).resolve().parent
 FONT_DIR = HERE / "fonts"
 
 TZ = ZoneInfo(os.environ.get("TZ_NAME") or "Asia/Kolkata")
-REFRESH = int(os.environ.get("REFRESH_SECONDS") or 1800)
+REFRESH = int(os.environ.get("REFRESH_SECONDS") or 60)
 WEEK_MODE = (os.environ.get("WEEK") or "calendar").lower()
 
 # e-ink friendly greys (Kindle shows 16 levels; keep text dark)
@@ -358,7 +361,8 @@ def draw_footer(d, now, p=None):
             parts.append(f"{p['later']} later")
         if p["undated"]:
             parts.append(f"{p['undated']} no date")
-    parts.append(f"updated {clock(now.time())}")
+    if not parts:
+        parts.append("synced with TickTick")
     d.line((M, H - 40, W - M, H - 40), fill=LIGHT, width=1)
     d.text((M, H - 31), "  ·  ".join(parts), font=F["footer"], fill=MID)
 
