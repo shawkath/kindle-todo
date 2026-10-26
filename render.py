@@ -23,7 +23,7 @@ Environment variables
     TZ_NAME         time zone for "today" (default Asia/Kolkata)
     LISTS           optional comma-separated TickTick list names to show
     WEEK            "calendar" (today .. Sunday, default) or "rolling" (next 7 days)
-    REFRESH_SECONDS how often the Kindle should check (default 60)
+    REFRESH_SECONDS how often the Kindle should check (default 300)
 
 Image file names are hashes of the pictures, and the pictures have no clock in
 them, so the Kindle only downloads and redraws when something actually changes.
@@ -52,12 +52,14 @@ HERE = Path(__file__).resolve().parent
 FONT_DIR = HERE / "fonts"
 
 TZ = ZoneInfo(os.environ.get("TZ_NAME") or "Asia/Kolkata")
-REFRESH = int(os.environ.get("REFRESH_SECONDS") or 60)
+REFRESH = int(os.environ.get("REFRESH_SECONDS") or 300)
 WEEK_MODE = (os.environ.get("WEEK") or "calendar").lower()
 
 # e-ink friendly greys (Kindle shows 16 levels; keep text dark)
 BLACK, DARK, MID, LIGHT, WHITE = 0, 55, 100, 205, 255
-ROW = 34                   # height of one compact task row
+ROW = 54                   # one task row: title line + list/tag line
+GROUP_H = 30               # height of a day/month heading inside a section
+BATTERY_W = 120            # top-right corner left empty for the Kindle battery overlay
 
 
 def font(weight, size):
@@ -68,20 +70,21 @@ def font(weight, size):
 
 
 F = {
-    "head": font("bold", 30),
-    "head_sub": font("regular", 17),
-    "label": font("bold", 14),
-    "top": font("bold", 23),
-    "num": font("bold", 18),
-    "row": font("regular", 21),
-    "row_b": font("bold", 21),
-    "row_meta": font("semibold", 15),
-    "day": font("bold", 14),
-    "footer": font("regular", 14),
-    "pager": font("regular", 15),
-    "pager_on": font("bold", 15),
+    "head": font("bold", 32),
+    "head_sub": font("regular", 18),
+    "label": font("bold", 16),
+    "top": font("bold", 27),
+    "num": font("bold", 20),
+    "row": font("regular", 25),
+    "row_b": font("bold", 25),
+    "row_meta": font("semibold", 19),
+    "sub": font("regular", 16),
+    "day": font("bold", 16),
+    "footer": font("regular", 16),
+    "pager": font("regular", 17),
+    "pager_on": font("bold", 17),
     "big": font("bold", 34),
-    "body": font("regular", 20),
+    "body": font("regular", 21),
 }
 
 
@@ -121,9 +124,11 @@ def fetch_tasks(token, wanted):
         except Exception as e:  # one bad list should not kill the screen
             print(f"warning: could not read list {p['name']}: {e}", file=sys.stderr)
             continue
-        for t in data.get("tasks", []) or []:
-            if t.get("status", 0) == 0:          # 0 = not completed
-                out.append((t, p["name"]))
+        open_tasks = [t for t in (data.get("tasks", []) or []) if t.get("status", 0) == 0]
+        if p["id"] == "inbox":
+            print(f"inbox: {len(open_tasks)} open tasks")
+        for t in open_tasks:                      # status 0 = not completed
+            out.append((t, p["name"]))
     return out
 
 
@@ -177,6 +182,67 @@ def when(i):
     return (d, t or dt.time(23, 59, 59))
 
 
+# ---------------------------------------------------------------- priority score
+# One number per task, used to rank Top 3, Yesterday, Missed and the Energy menu.
+#   TickTick priority  High +40 / Medium +20 / Low +10
+#   due today          +30
+#   days late          up to +25 (rises fast at first, then levels off)
+#   someone waiting    +15  (#for-Name tag, or "to/for/with Name" in the title)
+#   money / penalty    +15  (bill, pay, renew, insurance, tax, reimburse, ...)
+#   quick win          +5   (#5m..#15m tag, or a guessed no-brainer)
+#   overdue recurring  -20  (the next one comes round anyway)
+import math as _math
+import re as _re0
+
+PRIORITY_POINTS = {5: 40, 3: 20, 1: 10}
+MONEY_WORDS = {"bill", "bills", "pay", "payment", "renew", "renewal", "insurance", "tax", "taxes",
+               "reimburse", "reimbursement", "emi", "fee", "fees", "fine", "invoice", "salary",
+               "rent", "premium", "dues", "refund"}
+PEOPLE_STOP = {"the", "a", "an", "my", "me", "home", "work", "office", "it", "this", "that",
+               "today", "tomorrow", "next", "all", "everyone", "team"}
+
+
+def someone_waiting(item):
+    if any(t.lower().startswith("for-") for t in item["tags"]):
+        return True
+    for m in _re0.finditer(r"\b(?:to|for|with)\s+([A-Za-z][\w']+)", item["title"]):
+        w = m.group(1)
+        if w.lower() not in PEOPLE_STOP and (w[0].isupper() or w.lower().endswith(("bridge", "corp", "ltd"))):
+            return True
+    return False
+
+
+def is_quick(item):
+    mins = None
+    for t in item["tags"]:
+        mm = _re0.fullmatch(r"(?:(\d+)h)?(?:(\d+)m)?", t.lower())
+        if mm and (mm.group(1) or mm.group(2)):
+            mins = int(mm.group(1) or 0) * 60 + int(mm.group(2) or 0)
+    if mins is not None:
+        return mins <= 15
+    words = set(_re0.findall(r"[a-z]+", item["title"].lower()))
+    return bool(words & {"bill", "pay", "call", "book", "renew", "recharge", "reply", "text", "whatsapp"})
+
+
+def score(item, today):
+    s = PRIORITY_POINTS.get(item["priority"], 0)
+    due = item["due"]
+    late = (today - due[0]).days if due else 0
+    if due and late == 0:
+        s += 30
+    if late > 0:
+        s += min(25, round(8 * _math.log2(1 + late)))
+    if someone_waiting(item):
+        s += 15
+    if set(_re0.findall(r"[a-z]+", item["title"].lower())) & MONEY_WORDS:
+        s += 15
+    if is_quick(item):
+        s += 5
+    if late > 0 and item.get("repeat"):
+        s -= 20
+    return s
+
+
 def plan(tasks, now):
     today = now.date()
     yday = today - dt.timedelta(days=1)
@@ -184,9 +250,13 @@ def plan(tasks, now):
     next_end = end + dt.timedelta(days=7)
 
     items = [{"title": " ".join((t.get("title") or "(untitled)").split()),
-              "list": list_name,
+              "list": clean(list_name),
+              "tags": [clean(x) for x in (t.get("tags") or []) if clean(x)],
               "priority": t.get("priority", 0) or 0,
+              "repeat": bool(t.get("repeatFlag")),
               "due": due_of(t)} for t, list_name in tasks]
+    for i in items:
+        i["score"] = score(i, today)
     dated = [i for i in items if i["due"]]
 
     today_all = [i for i in dated if i["due"][0] == today]
@@ -198,18 +268,18 @@ def plan(tasks, now):
     undated = [i for i in items if not i["due"]]
 
     # top 3: most important today, then earliest
-    by_importance = sorted(today_all, key=lambda i: (-i["priority"], when(i)[1]))
+    by_importance = sorted(today_all, key=lambda i: (-i["score"], when(i)[1]))
     top3 = by_importance[:3]
     also_today = sorted(by_importance[3:], key=lambda i: when(i)[1])
 
-    yesterday.sort(key=lambda i: (-i["priority"], when(i)[1]))
+    yesterday.sort(key=lambda i: (-i["score"], when(i)[1]))
     this_week.sort(key=lambda i: when(i))
     next_week.sort(key=lambda i: when(i))
     later.sort(key=lambda i: when(i))
-    missed.sort(key=lambda i: (-i["priority"], when(i)))        # important, then oldest
+    missed.sort(key=lambda i: (-i["score"], when(i)))           # highest score, then oldest
     undated.sort(key=lambda i: (-i["priority"], i["title"].lower()))
 
-    return {"now": now, "today": today, "end": end,
+    return {"now": now, "today": today, "end": end, "today_all": today_all,
             "top3": top3, "also_today": also_today, "n_today": len(today_all),
             "yesterday": yesterday, "this_week": this_week,
             "missed": missed, "next_week": next_week, "later": later, "undated": undated}
@@ -245,6 +315,22 @@ def wrap(d, s, f, width, max_lines):
         lines = lines[:max_lines]
         lines[-1] = fit(d, lines[-1] + " …", f, width)
     return [fit(d, l, f, width) for l in lines]
+
+
+def clean(s):
+    """Drop emoji and other symbols the e-ink font can't draw (they'd show as boxes)."""
+    import unicodedata
+    out = "".join(ch for ch in str(s or "")
+                  if ord(ch) <= 0xFFFF and unicodedata.category(ch) not in ("So", "Cs", "Co", "Mn")
+                  and ch not in "\u200d\ufe0f")
+    return " ".join(out.split())
+
+
+def subline(item):
+    """'Home Maintenance  #urgent #car' shown under each title."""
+    parts = [item["list"]] if item["list"] else []
+    parts += [f"#{t}" for t in item.get("tags", [])]
+    return "   ".join(parts)
 
 
 def late_label(days):
@@ -302,49 +388,55 @@ def label(d, y, text, inverted=False):
     """Small uppercase section label. Inverted = white on black bar."""
     if inverted:
         wpx = tw(d, text, F["label"]) + 16
-        d.rectangle((M, y, M + wpx, y + 22), fill=BLACK)
+        d.rectangle((M, y, M + wpx, y + 24), fill=BLACK)
         d.text((M + 8, y + 3), text, font=F["label"], fill=WHITE)
     else:
         d.text((M, y + 3), text, font=F["label"], fill=DARK)
-    return y + 30
+    return y + 32
 
 
 def row(d, y, item, right_text, right_bold=False):
-    """One compact line: checkbox, title, right-aligned meta."""
-    box = 16
+    """Task row: checkbox + title (big), list/tags underneath (small), time on the right."""
+    box = 20
     d.rectangle((M, y + 8, M + box, y + 8 + box), outline=BLACK, width=2)
     rf = F["row_meta"]
     rw = tw(d, right_text, rf)
-    x = M + box + 12
+    x = M + box + 14
     title_f = F["row_b"] if item["priority"] >= 5 else F["row"]
-    d.text((x, y + 3), fit(d, item["title"], title_f, W - M - x - rw - 14),
+    d.text((x, y + 2), fit(d, item["title"], title_f, W - M - x - rw - 14),
            font=title_f, fill=BLACK)
     if right_text:
-        d.text((W - M - rw, y + 9), right_text, font=rf, fill=BLACK if right_bold else MID)
+        d.text((W - M - rw, y + 7), right_text, font=rf, fill=BLACK if right_bold else DARK)
+    sub = subline(item)
+    if sub:
+        d.text((x, y + 31), fit(d, sub, F["sub"], W - M - x), font=F["sub"], fill=MID)
     return y + ROW
 
 
-TOP_ROW = 46
+TOP_ROW = 62
 
 
 def top_row(d, y, n, item, right_text):
     """Big numbered row for the Top 3."""
-    s = 26
-    d.rectangle((M, y + 8, M + s, y + 8 + s), fill=BLACK)
+    sz = 30
+    d.rectangle((M, y + 6, M + sz, y + 6 + sz), fill=BLACK)
     num = str(n)
-    d.text((M + (s - tw(d, num, F["num"])) / 2, y + 9), num, font=F["num"], fill=WHITE)
+    d.text((M + (sz - tw(d, num, F["num"])) / 2, y + 9), num, font=F["num"], fill=WHITE)
     rf = F["row_meta"]
     rw = tw(d, right_text, rf)
-    x = M + s + 14
-    d.text((x, y + 7), fit(d, item["title"], F["top"], W - M - x - rw - 14), font=F["top"], fill=BLACK)
+    x = M + sz + 14
+    d.text((x, y + 3), fit(d, item["title"], F["top"], W - M - x - rw - 14), font=F["top"], fill=BLACK)
     if right_text:
-        d.text((W - M - rw, y + 15), right_text, font=rf, fill=DARK)
+        d.text((W - M - rw, y + 10), right_text, font=rf, fill=DARK)
+    sub = subline(item)
+    if sub:
+        d.text((x, y + 35), fit(d, sub, F["sub"], W - M - x), font=F["sub"], fill=MID)
     return y + TOP_ROW
 
 
 def more_line(d, y, text):
-    d.text((M + 28, y + 4), text, font=F["row_meta"], fill=DARK)
-    return y + 28
+    d.text((M + 34, y + 4), text, font=F["row_meta"], fill=DARK)
+    return y + 32
 
 
 def section(d, y, title, items, now, right_fn, rows, inverted=False, right_bold=False,
@@ -357,9 +449,9 @@ def section(d, y, title, items, now, right_fn, rows, inverted=False, right_bold=
             g = group_fn(i)
             if g != group:
                 group = g
-                d.text((M, y + 4), g, font=F["day"], fill=DARK)
-                d.line((M + tw(d, g, F["day"]) + 10, y + 13, W - M, y + 13), fill=LIGHT, width=1)
-                y += 26
+                d.text((M, y + 5), g, font=F["day"], fill=DARK)
+                d.line((M + tw(d, g, F["day"]) + 10, y + 15, W - M, y + 15), fill=LIGHT, width=1)
+                y += GROUP_H
         y = row(d, y, i, right_fn(i, now), right_bold)
         shown += 1
     if len(items) > shown:
@@ -370,11 +462,11 @@ def section(d, y, title, items, now, right_fn, rows, inverted=False, right_bold=
 def section_height(items, rows, group_fn=None):
     """Height a section() call will use."""
     shown = items[:rows]
-    h = 30 + len(shown) * ROW + 10
+    h = 32 + len(shown) * ROW + 10
     if group_fn:
-        h += len({group_fn(i) for i in shown}) * 26
+        h += len({group_fn(i) for i in shown}) * GROUP_H
     if len(items) > len(shown):
-        h += 28
+        h += 32
     return h
 
 
@@ -410,17 +502,25 @@ def share_rows(groups, space):
     return rows
 
 
-PAGES = ["Today", "Missed", "Later"]
+PAGES = ["Today", "Missed", "Later", "Energy", "Rescue"]
 
 
 def draw_header(d, now, title, sub=None):
-    y = 20
+    """Title on the left; counts next to it; top-right corner left empty for
+    the battery the Kindle draws on top."""
+    y = 16
     d.text((M, y), title, font=F["head"], fill=BLACK)
     if sub:
-        d.text((W - M - tw(d, sub, F["head_sub"]), y + 12), sub, font=F["head_sub"], fill=DARK)
-    y += 46
+        right = W - M - BATTERY_W
+        sw = tw(d, sub, F["head_sub"])
+        x = max(M + tw(d, title, F["head"]) + 18, right - sw)
+        d.text((x, y + 12), fit(d, sub, F["head_sub"], right - x), font=F["head_sub"], fill=DARK)
+    y += 48
     d.rectangle((M, y, W - M, y + 2), fill=BLACK)
     return y + 14
+
+
+SYNCED_AT = None   # set in main(): when GitHub last read TickTick
 
 
 def draw_pager(d, page, counts):
@@ -429,19 +529,20 @@ def draw_pager(d, page, counts):
     x = M
     for k, name in enumerate(PAGES):
         on = k == page
-        txt = name + (f" {counts[k]}" if counts[k] is not None and k else "")
-        r = 5
-        cy = H - 24
+        txt = name + (f" {counts[k]}" if counts[k] else "")
+        r = 4
+        cy = H - 25
         if on:
             d.ellipse((x, cy - r, x + 2 * r, cy + r), fill=BLACK)
         else:
             d.ellipse((x, cy - r, x + 2 * r, cy + r), outline=MID, width=2)
-        x += 2 * r + 8
+        x += 2 * r + 6
         f = F["pager_on"] if on else F["pager"]
         d.text((x, cy - 10), txt, font=f, fill=BLACK if on else MID)
-        x += tw(d, txt, f) + 22
-    hint = "tap sides ‹ ›"
-    d.text((W - M - tw(d, hint, F["footer"]), H - 33), hint, font=F["footer"], fill=MID)
+        x += tw(d, txt, f) + 13
+    if SYNCED_AT:
+        note = f"synced {clock(SYNCED_AT.time())}"
+        d.text((W - M - tw(d, note, F["footer"]), H - 34), note, font=F["footer"], fill=MID)
 
 
 BOTTOM = H - 56   # last usable pixel above the pager
@@ -453,8 +554,8 @@ def page_today(p):
     img = Image.new("L", (W, H), WHITE)
     d = ImageDraw.Draw(img)
     n_week = len(p["this_week"])
-    y = draw_header(d, now, now.strftime("%A %d %b").replace(" 0", " "),
-                    f"{p['n_today']} today  ·  {n_week} rest of week")
+    y = draw_header(d, now, now.strftime("%a %d %b").replace(" 0", " "),
+                    f"{p['n_today']} today · {n_week} this week")
 
     # Top 3
     y = label(d, y, "TOP 3 TODAY", inverted=True)
@@ -473,7 +574,7 @@ def page_today(p):
     if p["also_today"]:
         y = section(d, y, "ALSO TODAY", p["also_today"], now, right_today, rows[0])
     if p["yesterday"]:
-        y = section(d, y, "YESTERDAY", p["yesterday"], now, right_list, rows[1],
+        y = section(d, y, "YESTERDAY", p["yesterday"], now, right_time, rows[1],
                     right_bold=False, more_text="+ {n} more from yesterday")
     if p["this_week"]:
         y = section(d, y, "REST OF THIS WEEK", p["this_week"], now, right_time, rows[2],
@@ -481,7 +582,7 @@ def page_today(p):
     elif not (p["top3"] or p["also_today"] or p["yesterday"]):
         d.text((M, y + 20), "All clear for this week.", font=F["big"], fill=BLACK)
 
-    draw_pager(d, 0, [p["n_today"], len(p["missed"]), len(p["next_week"]) + len(p["later"])])
+    draw_pager(d, 0, pager_counts(p))
     return img
 
 
@@ -517,7 +618,7 @@ def page_missed(p):
                 y = section(d, y, names[k], b, now, right_late, rows[k], right_bold=True,
                             more_text="+ {n} more — open TickTick")
 
-    draw_pager(d, 1, [p["n_today"], len(missed), len(p["next_week"]) + len(p["later"])])
+    draw_pager(d, 1, pager_counts(p))
     return img
 
 
@@ -529,7 +630,7 @@ def page_later(p):
     nxt, later, undated = p["next_week"], p["later"], p["undated"]
     nw_start = p["end"] + dt.timedelta(days=1)
     title = "Next week & later"
-    y = draw_header(d, now, title, f"from {nw_start.strftime('%a %d %b').replace(' 0', ' ')}")
+    y = draw_header(d, now, title, f"from {nw_start.strftime('%d %b').lstrip('0')}")
 
     by_day = lambda i: day_name(i["due"][0], today)
     by_month = lambda i: i["due"][0].strftime("%B %Y").upper()
@@ -544,15 +645,326 @@ def page_later(p):
     if later:
         y = section(d, y, "LATER", later, now, right_date, rows[1], group_fn=by_month)
     if undated:
-        y = section(d, y, "NO DATE", undated, now, right_list, rows[2],
+        y = section(d, y, "NO DATE", undated, now, lambda i, n: "", rows[2],
                     more_text="+ {n} more without a date")
 
-    draw_pager(d, 2, [p["n_today"], len(p["missed"]), len(nxt) + len(later)])
+    draw_pager(d, 2, pager_counts(p))
     return img
 
 
-def render_pages(p):
-    return [page_today(p), page_missed(p), page_later(p)]
+# ---------------------------------------------------------------- page 4: Energy menu
+import re as _re
+
+ENERGY_TAGS = {
+    "sharp": "sharp", "deep": "sharp", "high": "sharp", "focus": "sharp",
+    "okay": "okay", "ok": "okay", "medium": "okay", "admin": "okay",
+    "drained": "drained", "low": "drained", "easy": "drained", "quick": "drained",
+}
+# best guesses when a task has no energy tag (whole words, case-insensitive)
+DRAINED_WORDS = ("bill", "pay", "call", "book", "renew", "recharge", "order", "buy", "reply",
+                 "haircut", "clean", "cleaning", "water", "remind", "text", "whatsapp", "email back")
+SHARP_WORDS = ("proposal", "design", "write", "plan", "strategy", "migration", "research", "review",
+               "build", "create", "draft", "prepare", "presentation", "wireframe", "spec", "seo", "audit")
+DEFAULT_MINUTES = {"sharp": 60, "okay": 20, "drained": 5}
+
+
+def energy_of(item):
+    for t in item["tags"]:
+        e = ENERGY_TAGS.get(t.lower())
+        if e:
+            return e
+    words = set(_re.findall(r"[a-z]+", item["title"].lower()))
+    if words & set(SHARP_WORDS):
+        return "sharp"
+    if words & set(DRAINED_WORDS):
+        return "drained"
+    return "okay"
+
+
+def minutes_of(item):
+    """From a #5m / #30m / #1h / #1h30m tag; None if not tagged."""
+    for t in item["tags"]:
+        m = _re.fullmatch(r"(?:(\d+)h)?(?:(\d+)m)?", t.lower())
+        if m and (m.group(1) or m.group(2)):
+            return int(m.group(1) or 0) * 60 + int(m.group(2) or 0)
+    return None
+
+
+def fmt_minutes(n, guessed):
+    s = f"{n // 60}h{n % 60:02d}" if n >= 60 and n % 60 else (f"{n // 60}h" if n >= 60 else f"{n}m")
+    return ("~" + s) if guessed else s
+
+
+def suggested_energy(now):
+    h = now.hour
+    if 6 <= h < 12:
+        return "sharp", f"{now:%A} morning · usually your sharpest hours"
+    if 12 <= h < 17:
+        return "okay", f"{now:%A} afternoon · good for admin and errands"
+    if 17 <= h < 21:
+        return "drained", f"{now:%A} evening · keep it light"
+    return "drained", "Late · only tiny things, then rest"
+
+
+def page_energy(p):
+    now, today = p["now"], p["today"]
+    img = Image.new("L", (W, H), WHITE)
+    d = ImageDraw.Draw(img)
+    y = draw_header(d, now, "Energy menu", "pick by how you feel")
+    best, line = suggested_energy(now)
+    d.text((M, y), line, font=F["sub"], fill=DARK)
+    y += 28
+
+    # what's actionable now: today, missed, and the rest of this week
+    pool = p["today_all"] + p["missed"] + p["this_week"]
+
+    def rank(i):
+        d0 = i["due"][0]
+        return (-i["score"], d0)
+
+    courses = {"sharp": [], "okay": [], "drained": []}
+    for i in sorted(pool, key=rank):
+        courses[energy_of(i)].append(i)
+
+    meta = {"sharp": ("Sharp", 3, "deep work"), "okay": ("Okay", 2, "admin & errands"),
+            "drained": ("Drained", 1, "no-brainers")}
+    order = ["sharp", "okay", "drained"]
+    ROW_E = 40
+    HEAD_E = 46
+
+    def course_h(n, total):
+        return HEAD_E + n * ROW_E + (30 if total > n else 0) + 8
+
+    # rows per course: the suggested one gets first pick of the space
+    space = BOTTOM - y - 3 * 12 - 26
+    rows = {k: 0 for k in order}
+    for k in [best] + [k for k in order if k != best]:
+        rows[k] = min(len(courses[k]), 1)
+    changed = True
+    while changed:
+        changed = False
+        for k in [best, best] + [k for k in order if k != best]:
+            if rows[k] < len(courses[k]):
+                rows[k] += 1
+                if sum(course_h(rows[c], len(courses[c])) for c in order) > space:
+                    rows[k] -= 1
+                else:
+                    changed = True
+
+    for k in order:
+        items = courses[k]
+        n = rows[k]
+        name, bars, desc = meta[k]
+        hl = k == best
+        h = course_h(n, len(items))
+        if hl:
+            d.rectangle((M, y, W - M, y + h), fill=BLACK)
+            fg, sub = WHITE, LIGHT
+        else:
+            d.rectangle((M, y, W - M, y + h), outline=BLACK, width=2)
+            fg, sub = BLACK, DARK
+        for b in range(3):
+            x = M + 14 + b * 16
+            d.rectangle((x, y + 14, x + 11, y + 32), fill=fg if b < bars else (MID if hl else LIGHT))
+        d.text((M + 70, y + 9), name, font=F["row_b"], fill=fg)
+        d.text((M + 70 + tw(d, name, F["row_b"]) + 12, y + 15),
+               f"{desc} · {len(items)}" + ("  ← now" if hl else ""), font=F["sub"], fill=sub)
+        ty = y + HEAD_E
+        if not items:
+            d.text((M + 18, ty - 4), "nothing here right now", font=F["sub"], fill=sub)
+        for i in items[:n]:
+            mins = minutes_of(i)
+            right = fmt_minutes(mins if mins else DEFAULT_MINUTES[k], mins is None)
+            late = (today - i["due"][0]).days
+            if late > 0:
+                right = f"{late_label(late)} late · " + right
+            elif late == 0:
+                right = "today · " + right
+            rw = tw(d, right, F["row_meta"])
+            tf = F["row_b"] if i["priority"] >= 5 else F["row"]
+            d.text((M + 18, ty), fit(d, "• " + i["title"], tf, W - 2 * M - rw - 40), font=tf, fill=fg)
+            d.text((W - M - 14 - rw, ty + 5), right, font=F["row_meta"], fill=sub)
+            ty += ROW_E
+        if len(items) > n:
+            d.text((M + 18, ty), f"+ {len(items) - n} more", font=F["row_meta"], fill=sub)
+        y += h + 12
+
+    d.text((M, min(y, BOTTOM - 22)), "Tag #sharp #okay #drained and #15m to sort these better.",
+           font=F["sub"], fill=MID)
+    draw_pager(d, 3, pager_counts(p))
+    return img
+
+
+# ---------------------------------------------------------------- page 5: Rescue mode
+HISTORY_FILE = HERE / "history" / "overdue.json"
+
+
+def update_history(p):
+    """Remember today's overdue count (last value of the day wins). Kept 60 days.
+    The workflow restores/saves this file with actions/cache, so nothing is committed."""
+    hist = {}
+    try:
+        hist = json.loads(HISTORY_FILE.read_text())
+    except Exception:
+        pass
+    hist[p["today"].isoformat()] = len(p["missed"])
+    keep = sorted(hist)[-60:]
+    hist = {k: hist[k] for k in keep}
+    try:
+        HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        HISTORY_FILE.write_text(json.dumps(hist))
+    except Exception as e:
+        print("warning: couldn't save history:", e, file=sys.stderr)
+    return hist
+
+
+def streak_of(hist, today):
+    """Days in a row (ending today) where the pile didn't grow."""
+    n, day = 0, today
+    while True:
+        prev = day - dt.timedelta(days=1)
+        a, b = hist.get(day.isoformat()), hist.get(prev.isoformat())
+        if a is None or b is None or a > b:
+            return n
+        n += 1
+        day = prev
+
+
+def triage_for(i, today):
+    """A decision, not an action. Checked in this order."""
+    t = i["title"].lower()
+    age = (today - i["due"][0]).days
+    words = set(_re.findall(r"[a-z]+", t))
+    if words & MONEY_WORDS:
+        return "PAY IT", "money: settle it, then it's gone"
+    if someone_waiting(i):
+        return "MESSAGE", "a 2-line message unblocks it"
+    if words & {"checkup", "appointment", "registration", "renewal", "visit", "meet", "meeting",
+                "doctor", "dentist", "haircut", "service", "certificate"}:
+        return "SCHEDULE", "pick a day for it"
+    if words & {"cleaning", "clean", "wash", "fix", "repair", "laundry"}:
+        return "DELEGATE", "who else can do it?"
+    if age > 180 and i["priority"] < 3:
+        return "DROP?", "still needed?"
+    return "DO IT", "under 15 min? just do it"
+
+
+def page_rescue(p, hist):
+    now, today = p["now"], p["today"]
+    img = Image.new("L", (W, H), WHITE)
+    d = ImageDraw.Draw(img)
+    missed = p["missed"]
+    y = draw_header(d, now, "Rescue mode", "shrink the pile")
+    HUGE = font("bold", 56)
+    MEDB = font("bold", 24)
+    MEDR = font("regular", 21)
+
+    if not missed:
+        d.text((M, y + 150), "Pile cleared.", font=F["big"], fill=BLACK)
+        d.text((M, y + 200), "Nothing overdue. Enjoy it.", font=F["body"], fill=DARK)
+        draw_pager(d, 4, pager_counts(p))
+        return img
+
+    # big number + trend vs a week ago
+    n = len(missed)
+    d.text((M, y - 4), str(n), font=HUGE, fill=BLACK)
+    x = M + tw(d, str(n), HUGE) + 14
+    d.text((x, y + 2), "overdue tasks", font=MEDB, fill=BLACK)
+    week_ago = hist.get((today - dt.timedelta(days=7)).isoformat())
+    if week_ago is None:
+        older = [k for k in sorted(hist) if k < today.isoformat()]
+        week_ago = hist[older[0]] if older else None
+        since = dt.date.fromisoformat(older[0]).strftime("%a") if older else None
+    else:
+        since = "last " + (today - dt.timedelta(days=7)).strftime("%A")
+    if week_ago is None:
+        trend = "tracking starts today"
+    elif week_ago > n:
+        trend = f"down {week_ago - n} since {since}"
+    elif week_ago < n:
+        trend = f"up {n - week_ago} since {since}"
+    else:
+        trend = f"same as {since}"
+    d.text((x, y + 34), trend, font=MEDR, fill=DARK)
+    y += 76
+
+    # last 7 days bars + streak
+    days = [today - dt.timedelta(days=k) for k in range(6, -1, -1)]
+    vals = [hist.get(dd.isoformat()) for dd in days]
+    top = max([v for v in vals if v is not None] + [1])
+    bw = 30
+    for k, (dd, v) in enumerate(zip(days, vals)):
+        bx = M + k * (bw + 10)
+        if v is not None:
+            h = max(3, int(52 * v / top))
+            d.rectangle((bx, y + 54 - h, bx + bw, y + 54), fill=BLACK if k == 6 else LIGHT)
+        else:
+            d.line((bx, y + 54, bx + bw, y + 54), fill=LIGHT, width=2)
+        d.text((bx + 9, y + 58), dd.strftime("%a")[0], font=F["label"], fill=MID)
+    st = streak_of(hist, today)
+    sx = M + 7 * (bw + 10) + 10
+    d.text((sx, y + 8), f"{st}-day streak" if st else "start a streak", font=MEDB, fill=BLACK)
+    d.text((sx, y + 38), "pile not growing" if st else "clear one today", font=F["sub"], fill=DARK)
+    y += 92
+
+    # where it's piling up
+    y = label(d, y, "WHERE IT'S PILING UP")
+    by_list = {}
+    for i in missed:
+        by_list.setdefault(i["list"] or "No list", []).append(i)
+    areas = sorted(by_list.items(), key=lambda kv: (-len(kv[1]), kv[0]))[:5]
+    most = max(len(v) for _, v in areas)
+    name_w, bar_max = 200, W - 2 * M - 200 - 120
+    for name, items in areas:
+        oldest = max((today - i["due"][0]).days for i in items)
+        d.text((M, y), fit(d, name, MEDR, name_w - 10), font=MEDR, fill=BLACK)
+        bl = max(8, int(bar_max * len(items) / most))
+        d.rectangle((M + name_w, y + 6, M + name_w + bl, y + 24), fill=BLACK)
+        d.text((M + name_w + bl + 10, y + 3), f"{len(items)} · {late_label(oldest)}",
+               font=F["row_meta"], fill=DARK)
+        y += 34
+    y += 10
+
+    # 3-minute triage: oldest first, spread across lists
+    y = label(d, y, "3-MINUTE TRIAGE: DECIDE, DON'T DO", inverted=True)
+    pool = sorted(missed, key=lambda i: i["due"][0])
+    picks, seen = [], set()
+    for i in pool:
+        if i["list"] not in seen:
+            picks.append(i)
+            seen.add(i["list"])
+        if len(picks) == 3:
+            break
+    for i in pool:
+        if len(picks) == 3:
+            break
+        if i not in picks:
+            picks.append(i)
+    for i in picks:
+        if y + 58 > BOTTOM:
+            break
+        verdict, hint = triage_for(i, today)
+        vw = tw(d, verdict, F["label"]) + 18
+        d.text((M, y), fit(d, i["title"], MEDB, W - 2 * M - vw - 12), font=MEDB, fill=BLACK)
+        late = (today - i["due"][0]).days
+        d.text((M, y + 31), fit(d, f"{late_label(late)} late · {i['list']}   → {hint}", F["sub"], W - 2 * M),
+               font=F["sub"], fill=DARK)
+        d.rectangle((W - M - vw, y + 4, W - M, y + 30), outline=BLACK, width=2)
+        d.text((W - M - vw + 9, y + 8), verdict, font=F["label"], fill=BLACK)
+        y += 62
+
+    draw_pager(d, 4, pager_counts(p))
+    return img
+
+
+def pager_counts(p):
+    return [None, len(p["missed"]), None, None, None]
+
+
+def render_pages(p, hist=None):
+    if hist is None:
+        hist = {p["today"].isoformat(): len(p["missed"])}
+    return [page_today(p), page_missed(p), page_later(p), page_energy(p), page_rescue(p, hist)]
 
 
 def render_message(now, title, body_lines):
@@ -615,11 +1027,11 @@ def demo_tasks():
            ("Migrate email to new workspace", -324), ("Pay electricity bill", -313, 5), ("Eye check-up", -308),
            ("Send posters to designer", -308), ("Renew vehicle insurance", -40, 3), ("Return library books", -9),
            ("Reply to accountant", -1), ("Water the plants", -1)]
-    out = [({"title": t[0], "dueDate": at(t[1]), **allday, "priority": (t[2] if len(t) > 2 else 0)}, "Home") for t in old]
+    out = [({"title": t[0], "dueDate": at(t[1]), **allday, "priority": (t[2] if len(t) > 2 else 0)}, "🏠 Home Maintenance") for t in old]
     out += [
-        ({"title": "Transfer domains to new registrar", "dueDate": at(0, 9, 30), "priority": 3}, "Inbox"),
+        ({"title": "Transfer domains to new registrar", "dueDate": at(0, 9, 30), "priority": 3, "tags": ["TD"]}, "Inbox"),
         ({"title": "Book domain and connect repo", "dueDate": at(0, 15)}, "Inbox"),
-        ({"title": "Review pull request from the team", "dueDate": at(0, 18), "priority": 5}, "Work"),
+        ({"title": "Review pull request from the team", "dueDate": at(0, 18), "priority": 5, "tags": ["WS", "urgent"]}, "Work"),
         ({"title": "Pay maid salary", "dueDate": at(0), **allday}, "Home"),
         ({"title": "Gym", "dueDate": at(0, 19, 30)}, "Personal"),
         ({"title": "Call plumber", "dueDate": at(1, 11)}, "Home"),
@@ -633,9 +1045,11 @@ def demo_tasks():
 
 
 def main():
+    global SYNCED_AT
     now = dt.datetime.now(TZ)
     if "--now" in sys.argv:   # e.g. --now 2026-10-22T16:00 for previews
         now = dt.datetime.fromisoformat(sys.argv[sys.argv.index("--now") + 1]).replace(tzinfo=TZ)
+    SYNCED_AT = now
 
     if "--demo" in sys.argv:
         for k, img in enumerate(render_pages(plan(demo_tasks(), now)), 1):
@@ -656,20 +1070,24 @@ def main():
         sample = next((t.get("dueDate") or t.get("startDate") for t, _ in tasks
                        if t.get("dueDate") or t.get("startDate")), None)
         print(f"sample date format from TickTick: {sample!r}")
-        images = render_pages(plan(tasks, now))
+        p = plan(tasks, now)
+        print(f"today: {p['n_today']}, yesterday: {len(p['yesterday'])}, missed: {len(p['missed'])}, "
+              f"rest of week: {len(p['this_week'])}, next week: {len(p['next_week'])}, "
+              f"later: {len(p['later'])}, no date: {len(p['undated'])}  (as of {now:%a %d %b %H:%M})")
+        images = render_pages(p, update_history(p))
     except TokenError:
         img = render_message(now, "Reconnect TickTick", [
             "Your TickTick access token has expired or was revoked.",
             "Run get-token.ps1 again and update the TICKTICK_TOKEN secret on GitHub.",
         ])
-        images = [img, img, img]
+        images = [img] * len(PAGES)
     except Exception as e:
         print("error:", repr(e), file=sys.stderr)
         img = render_message(now, "Couldn't reach TickTick", [
             "Will retry on the next refresh.",
             f"Details: {type(e).__name__}",
         ])
-        images = [img, img, img]
+        images = [img] * len(PAGES)
 
     write_site(images, base_url, dash_path)
 
