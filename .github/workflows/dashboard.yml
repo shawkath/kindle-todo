@@ -2,11 +2,11 @@ name: Update Kindle dashboard
 
 on:
   schedule:
-    - cron: "*/5 * * * *"   # every 30 minutes (GitHub may run it a few minutes late)
+    - cron: "*/5 * * * *"    # every 5 minutes: GitHub's fastest schedule (often runs a few minutes late)
   workflow_dispatch: {}      # lets you click "Run workflow" to refresh now
 
 permissions:
-  contents: read  
+  contents: read
   pages: write
   id-token: write
 
@@ -30,6 +30,13 @@ jobs:
       - name: Install Pillow
         run: pip install pillow==11.0.0
 
+      - name: Restore overdue history (for Rescue mode trend)
+        uses: actions/cache/restore@v4
+        with:
+          path: history
+          key: overdue-history-${{ github.run_id }}
+          restore-keys: overdue-history-
+
       - name: Render dashboard
         env:
           TICKTICK_TOKEN: ${{ secrets.TICKTICK_TOKEN }}
@@ -38,8 +45,16 @@ jobs:
           TZ_NAME: ${{ vars.TZ_NAME || 'Asia/Kolkata' }}
           LISTS: ${{ vars.LISTS }}
           WEEK: ${{ vars.WEEK || 'calendar' }}
-          REFRESH_SECONDS: ${{ vars.REFRESH_SECONDS || '60' }}
+          REFRESH_SECONDS: ${{ vars.REFRESH_SECONDS || '300' }}
         run: python render.py
+
+      - name: Save overdue history
+        if: always()
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: history
+          key: overdue-history-${{ github.run_id }}
 
       - uses: actions/upload-pages-artifact@v3
         with:
