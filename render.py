@@ -54,6 +54,26 @@ FONT_DIR = HERE / "fonts"
 TZ = ZoneInfo(os.environ.get("TZ_NAME") or "Asia/Kolkata")
 REFRESH = int(os.environ.get("REFRESH_SECONDS") or 300)
 WEEK_MODE = (os.environ.get("WEEK") or "calendar").lower()
+# Night mode: "21-6" = Kindle turns Wi-Fi off from 9pm and wakes at 6am. "off" disables it.
+QUIET_HOURS = (os.environ.get("QUIET_HOURS") or "21-6").strip().lower()
+
+
+def quiet_window(now):
+    """If `now` is inside quiet hours, return the datetime they end; else None."""
+    if QUIET_HOURS in ("", "off", "none", "0"):
+        return None
+    try:
+        a, b = (int(x) for x in QUIET_HOURS.split("-"))
+    except ValueError:
+        return None
+    h = now.hour
+    inside = (a <= h or h < b) if a > b else (a <= h < b)
+    if not inside:
+        return None
+    end = now.replace(hour=b, minute=0, second=0, microsecond=0)
+    if end <= now:
+        end += dt.timedelta(days=1)
+    return end
 
 # e-ink friendly greys (Kindle shows 16 levels; keep text dark)
 BLACK, DARK, MID, LIGHT, WHITE = 0, 55, 100, 205, 255
@@ -961,6 +981,41 @@ def pager_counts(p):
     return [None, len(p["missed"]), None, None, None]
 
 
+def page_night(p, wake):
+    """Shown as page 1 during quiet hours: tomorrow's plan, then the Kindle rests."""
+    now, today = p["now"], p["today"]
+    img = Image.new("L", (W, H), WHITE)
+    d = ImageDraw.Draw(img)
+    tomorrow = today + dt.timedelta(days=1) if now.hour >= 12 else today
+    y = draw_header(d, now, "Good night", "screen rests till " + clock(wake.time()))
+    d.text((M, y + 10), "Rest. Tomorrow is planned.", font=F["big"], fill=BLACK)
+    y += 70
+
+    due_next = [i for i in (p["this_week"] + p["today_all"] + p["next_week"]) if i["due"][0] == tomorrow]
+    due_next.sort(key=lambda i: (-i["score"], when(i)[1]))
+    label_txt = "FIRST THING " + ("TOMORROW" if tomorrow != today else "THIS MORNING")
+    y = label(d, y, label_txt, inverted=True)
+    if due_next:
+        for n, i in enumerate(due_next[:3], 1):
+            t = i["due"][1]
+            y = top_row(d, y, n, i, clock(t) if t else "")
+        if len(due_next) > 3:
+            y = more_line(d, y, f"+ {len(due_next) - 3} more tomorrow")
+    else:
+        d.text((M, y + 4), "Nothing scheduled. Pick one from Missed in the morning.", font=F["sub"], fill=DARK)
+        y += 40
+    y += 14
+    if p["missed"]:
+        top = p["missed"][0]
+        y = label(d, y, f"STILL WAITING  {len(p['missed'])} MISSED")
+        d.text((M, y), fit(d, "Most important: " + top["title"], F["row"], W - 2 * M), font=F["row"], fill=BLACK)
+        y += 40
+    d.text((M, BOTTOM - 30), f"Wi-Fi is off to save battery. Back at {clock(wake.time())}.",
+           font=F["sub"], fill=MID)
+    draw_pager(d, 0, pager_counts(p))
+    return img
+
+
 def render_pages(p, hist=None):
     if hist is None:
         hist = {p["today"].isoformat(): len(p["missed"])}
@@ -982,7 +1037,7 @@ def render_message(now, title, body_lines):
 
 
 # ---------------------------------------------------------------- output
-def write_site(images, base_url, dash_path):
+def write_site(images, base_url, dash_path, sleep_until=None):
     """Write one PNG per page plus api/display.
 
     api/display keeps the original single-screen fields (image_url/filename =
@@ -1009,6 +1064,7 @@ def write_site(images, base_url, dash_path):
         "image_url": pages[0]["image_url"],
         "filename": "-".join(pg["filename"][3:15] for pg in pages) + ".png",
         "refresh_rate": REFRESH,
+        "sleep_until": sleep_until,
         "pages": pages,
     }
     (out / "api" / "display").write_text(json.dumps(payload))
@@ -1075,6 +1131,9 @@ def main():
               f"rest of week: {len(p['this_week'])}, next week: {len(p['next_week'])}, "
               f"later: {len(p['later'])}, no date: {len(p['undated'])}  (as of {now:%a %d %b %H:%M})")
         images = render_pages(p, update_history(p))
+        wake = quiet_window(now)
+        if wake:
+            images[0] = page_night(p, wake)
     except TokenError:
         img = render_message(now, "Reconnect TickTick", [
             "Your TickTick access token has expired or was revoked.",
@@ -1089,7 +1148,8 @@ def main():
         ])
         images = [img] * len(PAGES)
 
-    write_site(images, base_url, dash_path)
+    wake = quiet_window(now)
+    write_site(images, base_url, dash_path, int(wake.timestamp()) if wake else None)
 
 
 if __name__ == "__main__":
