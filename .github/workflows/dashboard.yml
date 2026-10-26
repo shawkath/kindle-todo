@@ -46,6 +46,7 @@ jobs:
           LISTS: ${{ vars.LISTS }}
           WEEK: ${{ vars.WEEK || 'calendar' }}
           REFRESH_SECONDS: ${{ vars.REFRESH_SECONDS || '300' }}
+          QUIET_HOURS: ${{ vars.QUIET_HOURS || '21-6' }}
         run: python render.py
 
       - name: Save overdue history
