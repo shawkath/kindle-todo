@@ -2,7 +2,7 @@ name: Update Kindle dashboard
 
 on:
   schedule:
-    - cron: "*/5 * * * *"    # every 5 minutes: GitHub's fastest schedule (often runs a few minutes late)
+    - cron: "50 0-16 * * *"  # hourly backup at :50, 6:20am-10:20pm IST (the Kindle also asks for updates itself)
   workflow_dispatch: {}      # lets you click "Run workflow" to refresh now
 
 permissions:
@@ -45,8 +45,8 @@ jobs:
           TZ_NAME: ${{ vars.TZ_NAME || 'Asia/Kolkata' }}
           LISTS: ${{ vars.LISTS }}
           WEEK: ${{ vars.WEEK || 'calendar' }}
-          REFRESH_SECONDS: ${{ vars.REFRESH_SECONDS || '300' }}
-          QUIET_HOURS: ${{ vars.QUIET_HOURS || '21-6' }}
+          REFRESH_SECONDS: ${{ vars.REFRESH_SECONDS || '3600' }}
+          QUIET_HOURS: ${{ vars.QUIET_HOURS || '22-6' }}
         run: python render.py
 
       - name: Save overdue history
