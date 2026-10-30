@@ -23,7 +23,7 @@ Environment variables
     TZ_NAME         time zone for "today" (default Asia/Kolkata)
     LISTS           optional comma-separated TickTick list names to show
     WEEK            "calendar" (today .. Sunday, default) or "rolling" (next 7 days)
-    REFRESH_SECONDS how often the Kindle should check (default 300)
+    REFRESH_SECONDS how often the Kindle should check (default 3600 = hourly)
 
 Image file names are hashes of the pictures, and the pictures have no clock in
 them, so the Kindle only downloads and redraws when something actually changes.
@@ -52,10 +52,10 @@ HERE = Path(__file__).resolve().parent
 FONT_DIR = HERE / "fonts"
 
 TZ = ZoneInfo(os.environ.get("TZ_NAME") or "Asia/Kolkata")
-REFRESH = int(os.environ.get("REFRESH_SECONDS") or 300)
+REFRESH = int(os.environ.get("REFRESH_SECONDS") or 3600)
 WEEK_MODE = (os.environ.get("WEEK") or "calendar").lower()
-# Night mode: "21-6" = Kindle turns Wi-Fi off from 9pm and wakes at 6am. "off" disables it.
-QUIET_HOURS = (os.environ.get("QUIET_HOURS") or "21-6").strip().lower()
+# Night mode: "22-6" = Kindle turns Wi-Fi off from 10pm and wakes at 6am. "off" disables it.
+QUIET_HOURS = (os.environ.get("QUIET_HOURS") or "22-6").strip().lower()
 
 
 def quiet_window(now):
