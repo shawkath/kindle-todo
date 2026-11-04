@@ -34,6 +34,7 @@ local Font = require("ui/font")
 local FrameContainer = require("ui/widget/container/framecontainer")
 local OverlapGroup = require("ui/widget/overlapgroup")
 local TextWidget = require("ui/widget/textwidget")
+local VerticalGroup = require("ui/widget/verticalgroup")
 local PluginShare = require("pluginshare")
 local lfs = require("libs/libkoreader-lfs")
 local logger = require("logger")
@@ -98,7 +99,7 @@ local TrmnlDisplay = WidgetContainer:extend {
 }
 
 TrmnlDisplay.USER_AGENT = "trmnl-display/0.2.0-koreader"
-TrmnlDisplay.VERSION_LABEL = "TickTick dashboard v5.7 (tap to update)"
+TrmnlDisplay.VERSION_LABEL = "TickTick dashboard v5.8 (tap to update)"
 
 TrmnlDisplay.CONSTANTS = {
     TIMING = {
@@ -507,14 +508,24 @@ function TrmnlDisplay:buildBatteryWidget(screen_width)
         end
         local charging = powerd.isCharging and powerd:isCharging()
         local text = (charging and "charging " or "") .. tostring(level) .. "%"
+        -- Wi-Fi state on a second line, right-aligned under the battery
+        local online = self:isWifiConnected()
         local frame = FrameContainer:new {
             background = Blitbuffer.COLOR_WHITE,
             bordersize = 0,
             padding = Screen:scaleBySize(3),
-            TextWidget:new {
-                text = text,
-                face = Font:getFace("cfont", 16),
-                bold = level <= 20,
+            VerticalGroup:new {
+                align = "right",
+                TextWidget:new {
+                    text = text,
+                    face = Font:getFace("cfont", 16),
+                    bold = level <= 20,
+                },
+                TextWidget:new {
+                    text = online and "Wi-Fi on" or "Wi-Fi off",
+                    face = Font:getFace("cfont", 16),
+                    bold = not online,
+                },
             },
         }
         local size = frame:getSize()
@@ -527,6 +538,30 @@ function TrmnlDisplay:buildBatteryWidget(screen_width)
     logger.warn("TRMNL: Could not draw battery level:", widget)
     return nil
 end
+
+function TrmnlDisplay:isWifiConnected()
+    local ok, on = pcall(function() return NetworkMgr:isConnected() end)
+    return ok and on and true or false
+end
+
+-- Redraw the page on screen when Wi-Fi comes or goes, so the indicator stays true.
+function TrmnlDisplay:refreshWifiIndicator()
+    if self.wifi_redraw_task then
+        UIManager:unschedule(self.wifi_redraw_task)
+    end
+    self.wifi_redraw_task = function()
+        self.wifi_redraw_task = nil
+        local now_on = self:isWifiConnected()
+        if self.image_widget and self.page_paths and now_on ~= self.wifi_shown then
+            logger.info("TRMNL: Wi-Fi is now", now_on and "on" or "off", "- updating indicator")
+            self:displayImage(self.page_paths[self.page_index or 1])
+        end
+    end
+    UIManager:scheduleIn(3, self.wifi_redraw_task)   -- let the state settle first
+end
+
+function TrmnlDisplay:onNetworkConnected() self:refreshWifiIndicator() end
+function TrmnlDisplay:onNetworkDisconnected() self:refreshWifiIndicator() end
 
 function TrmnlDisplay:displayImage(image_path)
     -- NOTE: Keep old image visible while rendering new one
@@ -567,6 +602,7 @@ function TrmnlDisplay:displayImage(image_path)
     -- Battery level drawn on top of the image (top-right corner is kept empty by the server)
     local content = image
     local battery = self:buildBatteryWidget(screen_width)
+    self.wifi_shown = self:isWifiConnected()
     if battery then
         content = OverlapGroup:new {
             dimen = Geom:new { w = screen_width, h = screen_height },
@@ -799,6 +835,7 @@ function TrmnlDisplay:scheduleNextRefresh()
         interval = self.sleep_until - now + 60
         logger.info("TRMNL: Night mode, Wi-Fi off, next fetch in", interval, "seconds")
         pcall(function() NetworkMgr:turnOffWifi() end)
+        self:refreshWifiIndicator()
     end
     logger.info("TRMNL: Scheduling next refresh in", interval, "seconds")
     UIManager:scheduleIn(interval, self.refresh_task)
