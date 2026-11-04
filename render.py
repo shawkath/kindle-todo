@@ -1162,7 +1162,7 @@ def page_night(p, wake):
     img = Image.new("L", (W, H), WHITE)
     d = ImageDraw.Draw(img)
     tomorrow = today + dt.timedelta(days=1) if now.hour >= 12 else today
-    y = draw_header(d, now, "Good night", "screen rests till " + clock(wake.time()))
+    y = draw_header(d, now, "Good night", "updates resume " + clock(wake.time()))
     d.text((M, y + 10), "Rest. Tomorrow is planned.", font=F["big"], fill=BLACK)
     y += 70
 
@@ -1185,7 +1185,7 @@ def page_night(p, wake):
         y = label(d, y, f"STILL WAITING  {len(p['missed'])} MISSED")
         d.text((M, y), fit(d, "Most important: " + top["title"], F["row"], W - 2 * M), font=F["row"], fill=BLACK)
         y += 40
-    d.text((M, BOTTOM - 30), f"Wi-Fi is off to save battery. Back at {clock(wake.time())}.",
+    d.text((M, BOTTOM - 30), f"Updates pause overnight. Tap the middle to update now.",
            font=F["sub"], fill=MID)
     draw_pager(d, 0, pager_counts(p))
     return img
