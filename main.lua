@@ -99,7 +99,7 @@ local TrmnlDisplay = WidgetContainer:extend {
 }
 
 TrmnlDisplay.USER_AGENT = "trmnl-display/0.2.0-koreader"
-TrmnlDisplay.VERSION_LABEL = "TickTick dashboard v5.8 (tap to update)"
+TrmnlDisplay.VERSION_LABEL = "TickTick dashboard v5.9 (tap to update)"
 
 TrmnlDisplay.CONSTANTS = {
     TIMING = {
@@ -833,9 +833,9 @@ function TrmnlDisplay:scheduleNextRefresh()
     local now = os.time()
     if self.sleep_until and now < self.sleep_until then
         interval = self.sleep_until - now + 60
-        logger.info("TRMNL: Night mode, Wi-Fi off, next fetch in", interval, "seconds")
-        pcall(function() NetworkMgr:turnOffWifi() end)
-        self:refreshWifiIndicator()
+        -- Wi-Fi is NOT switched off any more: on this Kindle, turning it back on from
+        -- KOReader often fails ("Error connecting to the network"). It's plugged in anyway.
+        logger.info("TRMNL: Night mode, no fetching until morning; next fetch in", interval, "seconds")
     end
     logger.info("TRMNL: Scheduling next refresh in", interval, "seconds")
     UIManager:scheduleIn(interval, self.refresh_task)
