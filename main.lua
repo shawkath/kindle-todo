@@ -99,7 +99,7 @@ local TrmnlDisplay = WidgetContainer:extend {
 }
 
 TrmnlDisplay.USER_AGENT = "trmnl-display/0.2.0-koreader"
-TrmnlDisplay.VERSION_LABEL = "TickTick dashboard v5.9 (tap to update)"
+TrmnlDisplay.VERSION_LABEL = "TickTick dashboard v5.10 (tap to update)"
 
 TrmnlDisplay.CONSTANTS = {
     TIMING = {
@@ -1134,13 +1134,33 @@ function TrmnlDisplay:updateNow(from_tap)
         end
         return self:fetchAndDisplay()
     end
-    if self.updating then
+    -- An update normally takes 1-4 minutes. If Wi-Fi never connected, the old code
+    -- stayed "updating" forever; now anything older than 4 minutes is treated as stuck.
+    local now = os.time()
+    if self.updating and now - self.updating < 240 then
         if from_tap then
-            self:notify("Already updating, one moment...", { type = "progress", force = true })
+            local wifi = self:isWifiConnected() and "" or " (waiting for Wi-Fi)"
+            self:notify("Already updating" .. wifi .. ", started " .. (now - self.updating) ..
+                " s ago. New tasks show up within about 2 minutes.", { type = "progress", force = true })
         end
         return
     end
-    self.updating = true
+    if self.updating then
+        logger.warn("TRMNL: previous update stuck for", now - self.updating, "s, starting again")
+    end
+    self.updating = now
+    local my_update = now
+    -- watchdog: if Wi-Fi never connects, clear the flag so the next tap works
+    UIManager:scheduleIn(240, function()
+        if self.updating == my_update then
+            logger.warn("TRMNL: update didn't finish in 4 min (Wi-Fi?), clearing")
+            self.updating = false
+            if not self:isWifiConnected() then
+                self:notify("Couldn't connect to Wi-Fi. Tap the middle to try again.",
+                    { type = "error", force = true, timeout = 8 })
+            end
+        end
+    end)
 
     -- Book the next regular refresh now, in case anything below fails silently.
     self:unscheduleRefreshTask()
