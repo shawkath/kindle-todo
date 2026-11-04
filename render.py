@@ -56,6 +56,8 @@ REFRESH = int(os.environ.get("REFRESH_SECONDS") or 3600)
 WEEK_MODE = (os.environ.get("WEEK") or "calendar").lower()
 # Night mode: "22-6" = Kindle turns Wi-Fi off from 10pm and wakes at 6am. "off" disables it.
 QUIET_HOURS = (os.environ.get("QUIET_HOURS") or "22-6").strip().lower()
+# page 6: these TickTick lists, top 5 + everything else, whatever the date
+FOCUS_LISTS = [w.strip() for w in (os.environ.get("FOCUS_LISTS") or "Huron,Perso").split(",") if w.strip()]
 
 
 def quiet_window(now):
@@ -76,7 +78,7 @@ def quiet_window(now):
     return end
 
 # e-ink friendly greys (Kindle shows 16 levels; keep text dark)
-BLACK, DARK, MID, LIGHT, WHITE = 0, 55, 100, 205, 255
+BLACK, DARK, MID, LIGHT, WHITE = 0, 40, 70, 205, 255   # MID was 100: too faint on e-ink
 ROW = 54                   # one task row: title line + list/tag line
 GROUP_H = 30               # height of a day/month heading inside a section
 BATTERY_W = 120            # top-right corner left empty for the Kindle battery overlay
@@ -94,14 +96,15 @@ F = {
     "head_sub": font("regular", 18),
     "label": font("bold", 16),
     "top": font("bold", 27),
+    "top_sm": font("bold", 23),     # Top 5 on the list pages: smaller so long titles fit
     "num": font("bold", 20),
     "row": font("regular", 25),
     "row_b": font("bold", 25),
     "row_meta": font("semibold", 19),
     "sub": font("regular", 16),
     "day": font("bold", 16),
-    "footer": font("regular", 16),
-    "pager": font("regular", 17),
+    "footer": font("semibold", 17),
+    "pager": font("semibold", 17),
     "pager_on": font("bold", 17),
     "big": font("bold", 34),
     "body": font("regular", 21),
@@ -145,6 +148,12 @@ def fetch_tasks(token, wanted):
             print(f"warning: could not read list {p['name']}: {e}", file=sys.stderr)
             continue
         open_tasks = [t for t in (data.get("tasks", []) or []) if t.get("status", 0) == 0]
+        # sections ("columns") of the list, in TickTick's order
+        cols = sorted(data.get("columns") or [], key=lambda c: c.get("sortOrder") or 0)
+        col_pos = {c["id"]: (k, c.get("name") or "") for k, c in enumerate(cols)}
+        for t in open_tasks:
+            k, name = col_pos.get(t.get("columnId"), (len(cols), t.get("columnName") or ""))
+            t["_section"], t["_section_pos"] = name, k
         if p["id"] == "inbox":
             print(f"inbox: {len(open_tasks)} open tasks")
         for t in open_tasks:                      # status 0 = not completed
@@ -269,7 +278,10 @@ def plan(tasks, now):
     end = week_end(today)
     next_end = end + dt.timedelta(days=7)
 
-    items = [{"title": " ".join((t.get("title") or "(untitled)").split()),
+    items = [{"title": " ".join((t.get("title") or "").split()) or "No title",
+              "section": clean(t.get("_section") or ""),
+              "section_pos": t.get("_section_pos", 999),
+              "order": t.get("sortOrder") or 0,
               "list": clean(list_name),
               "tags": [clean(x) for x in (t.get("tags") or []) if clean(x)],
               "priority": t.get("priority", 0) or 0,
@@ -299,7 +311,7 @@ def plan(tasks, now):
     missed.sort(key=lambda i: (-i["score"], when(i)))           # highest score, then oldest
     undated.sort(key=lambda i: (-i["priority"], i["title"].lower()))
 
-    return {"now": now, "today": today, "end": end, "today_all": today_all,
+    return {"now": now, "today": today, "end": end, "today_all": today_all, "all": items,
             "top3": top3, "also_today": also_today, "n_today": len(today_all),
             "yesterday": yesterday, "this_week": this_week,
             "missed": missed, "next_week": next_week, "later": later, "undated": undated}
@@ -436,8 +448,9 @@ def row(d, y, item, right_text, right_bold=False):
 TOP_ROW = 62
 
 
-def top_row(d, y, n, item, right_text):
+def top_row(d, y, n, item, right_text, title_font=None):
     """Big numbered row for the Top 3."""
+    tf = title_font or F["top"]
     sz = 30
     d.rectangle((M, y + 6, M + sz, y + 6 + sz), fill=BLACK)
     num = str(n)
@@ -445,7 +458,7 @@ def top_row(d, y, n, item, right_text):
     rf = F["row_meta"]
     rw = tw(d, right_text, rf)
     x = M + sz + 14
-    d.text((x, y + 3), fit(d, item["title"], F["top"], W - M - x - rw - 14), font=F["top"], fill=BLACK)
+    d.text((x, y + 3 + (27 - tf.size) // 2), fit(d, item["title"], tf, W - M - x - rw - 14), font=tf, fill=BLACK)
     if right_text:
         d.text((W - M - rw, y + 10), right_text, font=rf, fill=DARK)
     sub = subline(item)
@@ -522,7 +535,8 @@ def share_rows(groups, space):
     return rows
 
 
-PAGES = ["Today", "Missed", "Later", "Energy", "Rescue"]
+BASE_PAGES = ["Today", "Missed", "Later", "Energy", "Rescue"]
+PAGES = BASE_PAGES + [clean(n) for n in FOCUS_LISTS]   # updated in render_pages()
 
 
 def draw_header(d, now, title, sub=None):
@@ -544,8 +558,31 @@ SYNCED_AT = None   # set in main(): when GitHub last read TickTick
 
 
 def draw_pager(d, page, counts):
-    """Footer: which page you're on, and what's on the others."""
+    """Footer: which page you're on, and what's on the others.
+    If all the names don't fit, show a dot per page and name only the current one."""
     d.line((M, H - 44, W - M, H - 44), fill=LIGHT, width=1)
+    full = sum(8 + 6 + tw(d, n + (f" {counts[k]}" if counts[k] else ""),
+                         F["pager_on"] if k == page else F["pager"]) + 10
+               for k, n in enumerate(PAGES))
+    if full > W - 2 * M - 70:
+        x, cy, r = M, H - 25, 5
+        for k in range(len(PAGES)):
+            if k == page:
+                d.ellipse((x, cy - r, x + 2 * r, cy + r), fill=BLACK)
+            else:
+                d.ellipse((x, cy - r, x + 2 * r, cy + r), outline=DARK, width=2)
+            x += 2 * r + 8
+        txt = f"{PAGES[page]}  {page + 1}/{len(PAGES)}"
+        d.text((x + 8, cy - 10), txt, font=F["pager_on"], fill=BLACK)
+        x += 8 + tw(d, txt, F["pager_on"]) + 16
+        if page != 1 and counts[1]:
+            m = f"Missed {counts[1]}"
+            d.text((x, cy - 10), m, font=F["pager"], fill=BLACK)
+            x += tw(d, m, F["pager"]) + 16
+        if SYNCED_AT:
+            note = f"synced {clock(SYNCED_AT.time())}"
+            d.text((W - M - tw(d, note, F["footer"]), H - 34), note, font=F["footer"], fill=BLACK)
+        return
     x = M
     for k, name in enumerate(PAGES):
         on = k == page
@@ -555,14 +592,17 @@ def draw_pager(d, page, counts):
         if on:
             d.ellipse((x, cy - r, x + 2 * r, cy + r), fill=BLACK)
         else:
-            d.ellipse((x, cy - r, x + 2 * r, cy + r), outline=MID, width=2)
+            d.ellipse((x, cy - r, x + 2 * r, cy + r), outline=DARK, width=2)
         x += 2 * r + 6
         f = F["pager_on"] if on else F["pager"]
-        d.text((x, cy - 10), txt, font=f, fill=BLACK if on else MID)
-        x += tw(d, txt, f) + 13
+        d.text((x, cy - 10), txt, font=f, fill=BLACK if on else DARK)
+        x += tw(d, txt, f) + 10
     if SYNCED_AT:
-        note = f"synced {clock(SYNCED_AT.time())}"
-        d.text((W - M - tw(d, note, F["footer"]), H - 34), note, font=F["footer"], fill=MID)
+        for note in (f"synced {clock(SYNCED_AT.time())}", clock(SYNCED_AT.time())):
+            nx = W - M - tw(d, note, F["footer"])
+            if nx >= x:          # only if it doesn't run into the page names
+                d.text((nx, H - 34), note, font=F["footer"], fill=BLACK)
+                break
 
 
 BOTTOM = H - 56   # last usable pixel above the pager
@@ -978,7 +1018,142 @@ def page_rescue(p, hist):
 
 
 def pager_counts(p):
-    return [None, len(p["missed"]), None, None, None]
+    return [None, len(p["missed"])] + [None] * (len(PAGES) - 2)
+
+
+# ---------------------------------------------------------------- page 6: Huron & Perso
+def right_any(i, now):
+    """Short due label for a page that mixes dated and undated tasks."""
+    if not i["due"]:
+        return ""
+    d, t = i["due"]
+    today = now.date()
+    if d < today:
+        return f"{late_label((today - d).days)} late"
+    if d == today:
+        return clock(t) if t else "today"
+    if d == today + dt.timedelta(days=1):
+        return "tomorrow"
+    return d.strftime("%d %b").lstrip("0")
+
+
+def focus_lists(p):
+    """[(name, [items sorted most important first]), ...] for FOCUS_LISTS, in that order."""
+    out = []
+    for name in FOCUS_LISTS:
+        key = clean(name).lower()
+        items = [i for i in p["all"] if i["list"].lower() == key]
+        items.sort(key=lambda i: (-i["score"], when(i) if i["due"] else (dt.date.max, dt.time.max),
+                                  i["section_pos"], i["order"]))
+        out.append((clean(name), items))
+    return out
+
+
+LIST_MAX_PAGES = int(os.environ.get("LIST_MAX_PAGES") or 3)   # per list, incl. "continued" pages
+COMPACT = 42                                                   # one-line row on the list pages
+
+
+def list_pages(p, name, items):
+    """Lay out one focus list: page 1 = Top 5 then sections; if the sections don't fit,
+    they carry on to "continued" pages (tap right = scroll down). Returns a list of
+    (page_title, draw_fn) where draw_fn(page_no) -> image."""
+    now = p["now"]
+    late = sum(1 for i in items if i["due"] and i["due"][0] < p["today"])
+    sub = f"{len(items)} open" + (f" · {late} late" if late else "")
+    show = [dict(i, list=i["section"]) for i in items]   # under each Top 5 title: its section
+    top5, rest = show[:5], show[5:]
+
+    # the rest as a stream of section labels and rows, in TickTick's section order
+    groups = {}
+    for i in rest:
+        groups.setdefault((i["section_pos"], i["section"]), []).append(i)
+    stream = []
+    for (pos, sec), g in sorted(groups.items()):
+        g.sort(key=lambda i: (-i["score"], i["order"]))
+        sec = sec or "No section"
+        stream.append(("label", sec, len(g)))
+        stream += [("row", sec, i) for i in g]
+
+    head_h = 16 + 48 + 14                         # what draw_header uses
+    first_y = head_h + (32 + len(top5) * TOP_ROW + 12 if top5 else 0)
+
+    # paginate the stream
+    pages, cur, y, k = [], [], first_y, 0
+    while k < len(stream):
+        kind = stream[k][0]
+        need = 32 + COMPACT if kind == "label" else COMPACT      # no label alone at the bottom
+        if y + need > BOTTOM:
+            pages.append(cur)
+            cur, y = [], head_h
+            if kind == "row":                                    # mid-section: repeat its label
+                sec = stream[k][1]
+                cur.append(("label", sec + " (cont.)", None))
+                y += 32
+            continue
+        cur.append(stream[k])
+        y += 32 if kind == "label" else COMPACT
+        k += 1
+    pages.append(cur)
+
+    # too many pages? keep the first few and say how many are left
+    if len(pages) > LIST_MAX_PAGES:
+        left = sum(1 for pg in pages[LIST_MAX_PAGES:] for e in pg if e[0] == "row")
+        pages = pages[:LIST_MAX_PAGES]
+        last = pages[-1]
+        while last and (head_h + sum(32 if e[0] == "label" else COMPACT for e in last) + 32 > BOTTOM):
+            if last.pop()[0] == "row":
+                left += 1
+        last.append(("more", f"+ {left} more — open TickTick", None))
+
+    def make(idx, entries):
+        def draw(page_no):
+            img = Image.new("L", (W, H), WHITE)
+            d = ImageDraw.Draw(img)
+            if idx == 0:
+                y = draw_header(d, now, name, sub)
+            else:
+                y = draw_header(d, now, name, f"continued · {idx + 1}/{len(pages)}")
+            if not items:
+                d.text((M, y + 160), "Nothing open here.", font=F["big"], fill=BLACK)
+            if idx == 0 and top5:
+                y = label(d, y, "TOP 5", inverted=True)
+                for n, i in enumerate(top5, 1):
+                    y = top_row(d, y, n, i, right_any(i, now), F["top_sm"])
+                y += 12
+            for kind, a, b in entries:
+                if kind == "label":
+                    y = label(d, y, a.upper() + (f"  {b}" if b else ""))
+                elif kind == "row":
+                    y = compact_row(d, y, b, now)
+                else:
+                    y = more_line(d, y, a)
+            if idx < len(pages) - 1:
+                t = "more on the next page  >"
+                d.text((W - M - tw(d, t, F["footer"]), BOTTOM - 22), t, font=F["footer"], fill=BLACK)
+            draw_pager(d, page_no, pager_counts(p))
+            return img
+        return draw
+
+    titles = [name] + [f"{name} {k + 1}" for k in range(1, len(pages))]
+    return [(titles[k], make(k, pg)) for k, pg in enumerate(pages)]
+
+
+def compact_row(d, y, item, now):
+    box = 20
+    d.rectangle((M, y + 9, M + box, y + 9 + box), outline=BLACK, width=2)
+    right = right_any(item, now)
+    rw = tw(d, right, F["row_meta"])
+    x = M + box + 14
+    title_f = F["row_b"] if item["priority"] >= 5 else F["row"]
+    t = fit(d, item["title"], title_f, W - M - x - rw - 14)
+    d.text((x, y + 3), t, font=title_f, fill=BLACK)
+    tags = "  ".join(f"#{g}" for g in item["tags"])
+    tx = x + tw(d, t, title_f) + 12
+    if tags and t == item["title"] and tx + 40 < W - M - rw - 14:
+        d.text((tx, y + 11), fit(d, tags, F["sub"], W - M - rw - 14 - tx), font=F["sub"], fill=MID)
+    if right:
+        d.text((W - M - rw, y + 8), right, font=F["row_meta"], fill=DARK)
+    return y + COMPACT
 
 
 def page_night(p, wake):
@@ -1019,7 +1194,13 @@ def page_night(p, wake):
 def render_pages(p, hist=None):
     if hist is None:
         hist = {p["today"].isoformat(): len(p["missed"])}
-    return [page_today(p), page_missed(p), page_later(p), page_energy(p), page_rescue(p, hist)]
+    global PAGES
+    extra = [pg for name, items in focus_lists(p) for pg in list_pages(p, name, items)]
+    PAGES = BASE_PAGES + [title for title, _ in extra]      # pager needs the full list first
+    pages = [page_today(p), page_missed(p), page_later(p), page_energy(p), page_rescue(p, hist)]
+    for title, draw in extra:
+        pages.append(draw(len(pages)))
+    return pages
 
 
 def render_message(now, title, body_lines):
@@ -1096,6 +1277,20 @@ def demo_tasks():
         ({"title": "Plan next week", "dueDate": at(3, 19), "priority": 3}, "Inbox"),
         ({"title": "Dentist appointment", "dueDate": at(9, 10)}, "Personal"),
         ({"title": "Buy printer ink"}, "Inbox"),
+        ({"title": "Send color scale to UI Team", "dueDate": at(0), **allday, "priority": 5, "_section": "MI", "_section_pos": 0}, "🔵 Huron"),
+        ({"title": "Care Journey filters", "dueDate": at(0), **allday, "priority": 3, "_section": "MI", "_section_pos": 0}, "🔵 Huron"),
+        ({"title": "Update no map state", "dueDate": at(0), **allday, "priority": 3, "_section": "MI", "_section_pos": 0}, "🔵 Huron"),
+        ({"title": "update no data on Communities and affliate tabs", "dueDate": at(0), **allday, "priority": 3, "_section": "MI", "_section_pos": 0}, "🔵 Huron"),
+        ({"title": "", "dueDate": at(0), **allday, "priority": 3, "_section": "MI", "_section_pos": 0}, "🔵 Huron"),
+        ({"title": "Provide transaction screens", "dueDate": at(0), **allday, "priority": 5, "_section": "RCI", "_section_pos": 1}, "🔵 Huron"),
+        ({"title": "provide css property files", "dueDate": at(0), **allday, "priority": 3, "_section": "RCI", "_section_pos": 1}, "🔵 Huron"),
+        ({"title": "check for more RCI screens list", "dueDate": at(0), **allday, "priority": 3, "_section": "RCI", "_section_pos": 1}, "🔵 Huron"),
+        ({"title": "Provide styling property to Chandra", "dueDate": at(0), **allday, "priority": 3, "_section": "RCW", "_section_pos": 2}, "🔵 Huron"),
+        ({"title": "Renew passport", "priority": 5}, "🧡Perso"),
+        ({"title": "Book car service", "dueDate": at(3), **allday}, "🧡Perso"),
+        ({"title": "Read a chapter", "tags": ["drained"]}, "🧡Perso"),
+        ({"title": "Organise photos"}, "🧡Perso"),
+        ({"title": "Call bank about card", "dueDate": at(-6), **allday}, "🧡Perso"),
     ]
     return out
 
