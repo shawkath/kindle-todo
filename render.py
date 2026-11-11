@@ -58,6 +58,12 @@ WEEK_MODE = (os.environ.get("WEEK") or "calendar").lower()
 QUIET_HOURS = (os.environ.get("QUIET_HOURS") or "22-6").strip().lower()
 # page 6: these TickTick lists, top 5 + everything else, whatever the date
 FOCUS_LISTS = [w.strip() for w in (os.environ.get("FOCUS_LISTS") or "Huron,Perso").split(",") if w.strip()]
+# Asana: open tasks assigned to you, shown as their own list page (sections = Asana projects)
+ASANA_TOKEN = (os.environ.get("ASANA_TOKEN") or "").strip()
+ASANA_LIST = (os.environ.get("ASANA_LIST") or "eNoor").strip()
+ASANA_EVERYWHERE = (os.environ.get("ASANA_EVERYWHERE") or "").strip().lower() in ("1", "yes", "true", "on")
+if ASANA_TOKEN and ASANA_LIST.lower() not in [f.lower() for f in FOCUS_LISTS]:
+    FOCUS_LISTS.append(ASANA_LIST)
 
 
 def quiet_window(now):
@@ -158,6 +164,61 @@ def fetch_tasks(token, wanted):
             print(f"inbox: {len(open_tasks)} open tasks")
         for t in open_tasks:                      # status 0 = not completed
             out.append((t, p["name"]))
+    return out
+
+
+# ---------------------------------------------------------------- Asana
+ASANA_API = "https://app.asana.com/api/1.0"
+
+
+def asana_get(path, token):
+    req = urllib.request.Request(ASANA_API + path, headers={
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+        "User-Agent": "kindle-ticktick-dashboard",
+    })
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return json.load(r)
+
+
+def fetch_asana(token, list_name):
+    """Open Asana tasks assigned to you, in every workspace, shaped like TickTick tasks
+    so the rest of the code treats them the same. Section on the Kindle = Asana project."""
+    me = asana_get("/users/me?opt_fields=workspaces.name", token)["data"]
+    raw = []
+    fields = "name,due_on,due_at,projects.name,tags.name,completed"
+    for ws in me.get("workspaces") or []:
+        offset = None
+        while True:
+            q = (f"/tasks?assignee=me&workspace={ws['gid']}&completed_since=now"
+                 f"&limit=100&opt_fields={fields}" + (f"&offset={offset}" if offset else ""))
+            page = asana_get(q, token)
+            raw += [t for t in page.get("data") or [] if not t.get("completed")]
+            offset = ((page.get("next_page") or {}).get("offset"))
+            if not offset:
+                break
+
+    projects = sorted({(t.get("projects") or [{}])[0].get("name") or "" for t in raw} - {""}, key=str.lower)
+    pos = {n: k for k, n in enumerate(projects)}
+    out = []
+    for t in raw:
+        proj = (t.get("projects") or [{}])[0].get("name") or ""
+        task = {
+            "title": t.get("name") or "",
+            "priority": 0,
+            "tags": [g.get("name") for g in t.get("tags") or [] if g.get("name")],
+            "_section": proj or "No project",
+            "_section_pos": pos.get(proj, len(projects)),
+            "sortOrder": 0,
+        }
+        if t.get("due_at"):
+            task["dueDate"] = t["due_at"]
+        elif t.get("due_on"):
+            task["dueDate"] = t["due_on"]
+            task["isAllDay"] = True
+            task["timeZone"] = str(TZ)
+        out.append((task, list_name))
+    print(f"asana: {len(out)} open tasks assigned to you")
     return out
 
 
@@ -1042,7 +1103,7 @@ def focus_lists(p):
     out = []
     for name in FOCUS_LISTS:
         key = clean(name).lower()
-        items = [i for i in p["all"] if i["list"].lower() == key]
+        items = [i for i in p["all"] + p.get("extra", []) if i["list"].lower() == key]
         items.sort(key=lambda i: (-i["score"], when(i) if i["due"] else (dt.date.max, dt.time.max),
                                   i["section_pos"], i["order"]))
         out.append((clean(name), items))
@@ -1323,7 +1384,17 @@ def main():
         sample = next((t.get("dueDate") or t.get("startDate") for t, _ in tasks
                        if t.get("dueDate") or t.get("startDate")), None)
         print(f"sample date format from TickTick: {sample!r}")
-        p = plan(tasks, now)
+        asana = []
+        if ASANA_TOKEN:
+            try:
+                asana = fetch_asana(ASANA_TOKEN, ASANA_LIST)
+            except Exception as e:      # Asana trouble must not break the TickTick pages
+                print(f"warning: could not read Asana: {e!r}", file=sys.stderr)
+        if ASANA_EVERYWHERE:
+            p = plan(tasks + asana, now)
+        else:
+            p = plan(tasks, now)
+            p["extra"] = plan(asana, now)["all"] if asana else []
         print(f"today: {p['n_today']}, yesterday: {len(p['yesterday'])}, missed: {len(p['missed'])}, "
               f"rest of week: {len(p['this_week'])}, next week: {len(p['next_week'])}, "
               f"later: {len(p['later'])}, no date: {len(p['undated'])}  (as of {now:%a %d %b %H:%M})")
