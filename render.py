@@ -57,10 +57,10 @@ WEEK_MODE = (os.environ.get("WEEK") or "calendar").lower()
 # Night mode: "22-6" = Kindle turns Wi-Fi off from 10pm and wakes at 6am. "off" disables it.
 QUIET_HOURS = (os.environ.get("QUIET_HOURS") or "22-6").strip().lower()
 # page 6: these TickTick lists, top 5 + everything else, whatever the date
-FOCUS_LISTS = [w.strip() for w in (os.environ.get("FOCUS_LISTS") or "Huron,Perso").split(",") if w.strip()]
+FOCUS_LISTS = [w.strip() for w in (os.environ.get("FOCUS_LISTS") or "Huron,Perso,eNoor").split(",") if w.strip()]
 # Asana: open tasks assigned to you, shown as their own list page (sections = Asana projects)
 ASANA_TOKEN = (os.environ.get("ASANA_TOKEN") or "").strip()
-ASANA_LIST = (os.environ.get("ASANA_LIST") or "eNoor").strip()
+ASANA_LIST = (os.environ.get("ASANA_LIST") or "Asana").strip()
 ASANA_EVERYWHERE = (os.environ.get("ASANA_EVERYWHERE") or "").strip().lower() in ("1", "yes", "true", "on")
 if ASANA_TOKEN and ASANA_LIST.lower() not in [f.lower() for f in FOCUS_LISTS]:
     FOCUS_LISTS.append(ASANA_LIST)
@@ -107,6 +107,9 @@ F = {
     "row": font("regular", 25),
     "row_b": font("bold", 25),
     "row_meta": font("semibold", 19),
+    "energy": font("regular", 21),      # Energy menu rows: smaller so titles fit
+    "energy_b": font("bold", 21),
+    "energy_meta": font("semibold", 16),
     "sub": font("regular", 16),
     "day": font("bold", 16),
     "footer": font("semibold", 17),
@@ -811,6 +814,28 @@ def minutes_of(item):
     return None
 
 
+def fmt_span(n):
+    """20 -> '20 mins', 60 -> '1 hr', 90 -> '1h 30m'"""
+    if n < 60:
+        return f"{n} mins"
+    return f"{n // 60} hr" if n % 60 == 0 else f"{n // 60}h {n % 60}m"
+
+
+def box_size_label(items, k):
+    """Time label for an Energy box: '~20 mins' if they're all about the same,
+    else a range like '5–30 mins'."""
+    vals = sorted({minutes_of(i) or DEFAULT_MINUTES[k] for i in items})
+    if not vals:
+        return ""
+    guessed = all(minutes_of(i) is None for i in items)
+    if len(vals) == 1:
+        return ("~" if guessed else "") + fmt_span(vals[0])
+    lo, hi = vals[0], vals[-1]
+    if hi < 60:
+        return f"{lo}–{hi} mins"
+    return f"{fmt_span(lo)} – {fmt_span(hi)}"
+
+
 def fmt_minutes(n, guessed):
     s = f"{n // 60}h{n % 60:02d}" if n >= 60 and n % 60 else (f"{n // 60}h" if n >= 60 else f"{n}m")
     return ("~" + s) if guessed else s
@@ -850,8 +875,8 @@ def page_energy(p):
     meta = {"sharp": ("Sharp", 3, "deep work"), "okay": ("Okay", 2, "admin & errands"),
             "drained": ("Drained", 1, "no-brainers")}
     order = ["sharp", "okay", "drained"]
-    ROW_E = 40
-    HEAD_E = 46
+    ROW_E = 34
+    HEAD_E = 44
 
     def course_h(n, total):
         return HEAD_E + n * ROW_E + (30 if total > n else 0) + 8
@@ -890,21 +915,22 @@ def page_energy(p):
         d.text((M + 70, y + 9), name, font=F["row_b"], fill=fg)
         d.text((M + 70 + tw(d, name, F["row_b"]) + 12, y + 15),
                f"{desc} · {len(items)}" + ("  ← now" if hl else ""), font=F["sub"], fill=sub)
+        size = box_size_label(items[:n], k)           # time per task, once per box
+        if size:
+            sw = tw(d, size, F["row_meta"])
+            d.text((W - M - 14 - sw, y + 13), size, font=F["row_meta"], fill=fg)
         ty = y + HEAD_E
         if not items:
             d.text((M + 18, ty - 4), "nothing here right now", font=F["sub"], fill=sub)
         for i in items[:n]:
-            mins = minutes_of(i)
-            right = fmt_minutes(mins if mins else DEFAULT_MINUTES[k], mins is None)
             late = (today - i["due"][0]).days
-            if late > 0:
-                right = f"{late_label(late)} late · " + right
-            elif late == 0:
-                right = "today · " + right
-            rw = tw(d, right, F["row_meta"])
-            tf = F["row_b"] if i["priority"] >= 5 else F["row"]
-            d.text((M + 18, ty), fit(d, "• " + i["title"], tf, W - 2 * M - rw - 40), font=tf, fill=fg)
-            d.text((W - M - 14 - rw, ty + 5), right, font=F["row_meta"], fill=sub)
+            right = f"{late_label(late)} late" if late > 0 else ""   # size moved to the box corner
+            rw = tw(d, right, F["energy_meta"]) if right else 0
+            tf = F["energy_b"] if i["priority"] >= 5 else F["energy"]
+            d.text((M + 18, ty), fit(d, "• " + i["title"], tf, W - 2 * M - rw - (44 if rw else 32)),
+                   font=tf, fill=fg)
+            if right:
+                d.text((W - M - 14 - rw, ty + 5), right, font=F["energy_meta"], fill=sub)
             ty += ROW_E
         if len(items) > n:
             d.text((M + 18, ty), f"+ {len(items) - n} more", font=F["row_meta"], fill=sub)
