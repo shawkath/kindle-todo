@@ -1238,7 +1238,9 @@ def write_site(images, base_url, dash_path, sleep_until=None):
         digest = hashlib.sha1(tmp.read_bytes()).hexdigest()[:12]
         name = f"p{k}-{digest}.png"
         tmp.rename(out / name)
-        pages.append({"image_url": f"{base_url.rstrip('/')}/{dash_path}/{name}", "filename": name})
+        title = PAGES[k - 1] if len(PAGES) == len(images) else f"Page {k}"
+        pages.append({"image_url": f"{base_url.rstrip('/')}/{dash_path}/{name}", "filename": name,
+                      "title": title})
         print("wrote", out / name)
 
     payload = {
