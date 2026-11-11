@@ -47,9 +47,9 @@ jobs:
           WEEK: ${{ vars.WEEK || 'calendar' }}
           REFRESH_SECONDS: ${{ vars.REFRESH_SECONDS || '3600' }}
           QUIET_HOURS: ${{ vars.QUIET_HOURS || '22-6' }}
-          FOCUS_LISTS: ${{ vars.FOCUS_LISTS || 'Huron,Perso' }}
+          FOCUS_LISTS: ${{ vars.FOCUS_LISTS || 'Huron,Perso,eNoor' }}
           ASANA_TOKEN: ${{ secrets.ASANA_TOKEN }}
-          ASANA_LIST: ${{ vars.ASANA_LIST || 'eNoor' }}
+          ASANA_LIST: ${{ vars.ASANA_LIST || 'Asana' }}
           ASANA_EVERYWHERE: ${{ vars.ASANA_EVERYWHERE }}
         run: python render.py
 
