@@ -21,16 +21,16 @@ W, H, M = 800, 600, 20
 BLACK, DARK, MID, LIGHT, PALE, WHITE = 0, 40, 75, 190, 232, 255
 f = R.font
 T_TITLE = f("bold", 26)
-T_DATE = f("regular", 20)
-T_LABEL = f("semibold", 15)
-T_META = f("regular", 16)
-T_META_B = f("semibold", 16)
+T_DATE = f("semibold", 20)
+T_LABEL = f("semibold", 16)
+T_META = f("semibold", 17)
+T_META_B = f("semibold", 17)
 T_MED_B = f("bold", 22)
 T_STAT = f("bold", 28)
 T_BIG = f("bold", 36)
-ROW_SIZES = [20, 19, 18, 17, 16, 15, 14, 13, 12]
-ROW_H = 33
-HEAD_H = 30
+ROW_SIZES = [22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12]
+ROW_H = 36
+HEAD_H = 32
 TOP_Y = 66
 BOTTOM = H - 46
 DAY_END = int(os.environ.get("DAY_END") or 23)          # "day left" counts down to this hour
@@ -45,10 +45,10 @@ def tw(d, s, ft):
 def row_font(d, text, width, bold=False):
     """Largest size that fits the whole text on one line."""
     for s in ROW_SIZES:
-        ft = f("bold" if bold else "regular", s)
+        ft = f("bold" if bold else "semibold", s)
         if tw(d, text, ft) <= width:
             return ft
-    return f("bold" if bold else "regular", ROW_SIZES[-1])
+    return f("bold" if bold else "semibold", ROW_SIZES[-1])
 
 
 # ------------------------------------------------------------------ small text helpers
@@ -169,26 +169,40 @@ def task_row(d, y, title, meta="", marker="check", n=None, bold=False, chip=None
     """One task, one line, full text."""
     x = M
     if marker == "check":
-        d.rectangle((x, y + 9, x + 14, y + 23), outline=BLACK, width=2)
-        tx = x + 22
+        d.rectangle((x, y + 10, x + 15, y + 25), outline=BLACK, width=2)
+        tx = x + 25
     elif marker == "number":
-        d.rectangle((x, y + 4, x + 22, y + 26), fill=BLACK)
-        d.text((x + 11 - tw(d, str(n), T_META_B) / 2, y + 6), str(n), font=T_META_B, fill=WHITE)
-        tx = x + 30
+        d.rectangle((x, y + 5, x + 25, y + 30), fill=BLACK)
+        d.text((x + 13 - tw(d, str(n), T_META_B) / 2, y + 8), str(n), font=T_META_B, fill=WHITE)
+        tx = x + 33
     else:
         tx = x
     right_w = 0
     if chip:
         cw = tw(d, chip, T_LABEL) + 14
-        d.rectangle((W - M - cw, y + 5, W - M, y + 25), outline=BLACK, width=2)
-        d.text((W - M - cw + 7, y + 8), chip, font=T_LABEL, fill=BLACK)
+        d.rectangle((W - M - cw, y + 6, W - M, y + 30), outline=BLACK, width=2)
+        d.text((W - M - cw + 7, y + 9), chip, font=T_LABEL, fill=BLACK)
         right_w = cw + 10
+    # Keep the title big: if it doesn't fit at full size, drop details from the right
+    # side first ("someone waiting", then the list name) before shrinking the title.
+    if meta:
+        parts = meta.split(" · ")
+        options = [parts, [p_ for p_ in parts if p_ != "someone waiting"]]
+        options.append(options[-1][1:] if len(options[-1]) > 1 else options[-1])
+        options.append([])
+        full = f("bold" if bold else "semibold", ROW_SIZES[0])
+        for opt in options:
+            m_ = " · ".join(opt)
+            mw = tw(d, m_, T_META) if m_ else 0
+            if tw(d, title, full) <= W - M - right_w - mw - 16 - tx or not opt:
+                break
+        meta = m_
     if meta:
         mw = tw(d, meta, T_META)
-        d.text((W - M - right_w - mw, y + 8), meta, font=T_META, fill=DARK)
+        d.text((W - M - right_w - mw, y + 10), meta, font=T_META, fill=DARK)
         right_w += mw
     ft = row_font(d, title, W - M - right_w - 16 - tx, bold)
-    d.text((tx, y + 5 + (20 - ft.size) // 2), title, font=ft, fill=BLACK)
+    d.text((tx, y + 6 + (22 - ft.size) // 2), title, font=ft, fill=BLACK)
     return y + ROW_H
 
 
@@ -434,19 +448,19 @@ def page_today(book, p, hist, tr):
         meta = meta_for(top, today)
         mw = tw(d, meta, T_META)
         d.text((W - M - 10 - mw, y + 10), meta, font=T_META, fill=LIGHT)
-        avail = W - M - 10 - mw - 16 - (M + 124)
+        avail = W - M - 10 - mw - 16 - (M + 136)
         ft = T_MED_B
         for s_ in (22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12):
             ft = f("bold", s_)
             if tw(d, top["title"], ft) <= avail:
                 break
-        d.text((M + 124, y + 7 + (22 - ft.size) // 2), top["title"], font=ft, fill=WHITE)
+        d.text((M + 136, y + 7 + (22 - ft.size) // 2), top["title"], font=ft, fill=WHITE)
         if step:
             d.text((M + 10, y + 41), "FIRST STEP", font=T_LABEL, fill=LIGHT)
-            sf = row_font(d, step, W - 2 * M - 124 - 10)
-            d.text((M + 124, y + 39), step, font=sf, fill=WHITE)
+            sf = row_font(d, step, W - 2 * M - 136 - 10)
+            d.text((M + 136, y + 39), step, font=sf, fill=WHITE)
     else:
-        d.text((M + 124, y + 7), "Nothing urgent. Pick something from Energy.", font=T_MED_B, fill=WHITE)
+        d.text((M + 136, y + 7), "Nothing urgent. Pick something from Energy.", font=T_MED_B, fill=WHITE)
     y += bar_h + 8
 
     # ---- the rest, shared fairly
@@ -574,8 +588,8 @@ def page_energy(book, p):
         for b in range(3):
             bx = M + 10 + b * 12
             d.rectangle((bx, y + 10, bx + 8, y + 24), fill=fg if b < bars else (MID if hl else LIGHT))
-        d.text((M + 56, y + 7), name, font=f("bold", 20), fill=fg)
-        d.text((M + 64 + tw(d, name, f("bold", 20)), y + 10), f"{desc} · {len(items)}", font=T_META, fill=sub)
+        d.text((M + 56, y + 7), name, font=f("bold", 22), fill=fg)
+        d.text((M + 64 + tw(d, name, f("bold", 22)), y + 10), f"{desc} · {len(items)}", font=T_META, fill=sub)
         if items:
             vals = sorted({R.minutes_of(i) or R.DEFAULT_MINUTES[k] for i in items[:r]})
             size = ("~" + span(vals[0]) + " each") if len(vals) == 1 else f"{span(vals[0])} – {span(vals[-1])}"
