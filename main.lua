@@ -35,6 +35,7 @@ local FrameContainer = require("ui/widget/container/framecontainer")
 local OverlapGroup = require("ui/widget/overlapgroup")
 local TextWidget = require("ui/widget/textwidget")
 local VerticalGroup = require("ui/widget/verticalgroup")
+local Event = require("ui/event")
 local PluginShare = require("pluginshare")
 local lfs = require("libs/libkoreader-lfs")
 local logger = require("logger")
@@ -99,12 +100,12 @@ local TrmnlDisplay = WidgetContainer:extend {
 }
 
 TrmnlDisplay.USER_AGENT = "trmnl-display/0.2.0-koreader"
-TrmnlDisplay.VERSION_LABEL = "TickTick dashboard v5.10 (tap to update)"
+TrmnlDisplay.VERSION_LABEL = "TickTick dashboard v6.0 (tap to update)"
 
 TrmnlDisplay.CONSTANTS = {
     TIMING = {
         DEFAULT_REFRESH_INTERVAL = 1800,
-        RETURN_HOME_SECONDS = 120,   -- go back to page 1 after this long on another page
+        RETURN_HOME_SECONDS = 0,     -- 0 = stay on the page you picked (was 120 s back to page 1)
         REOPEN_SECONDS = 600,        -- reopen the dashboard this long after it's closed
     },
     FILES = {
@@ -159,6 +160,7 @@ function TrmnlDisplay:init()
     -- until USB is connected. Stay awake whenever KOReader runs, and always open the
     -- dashboard on start (a few seconds later, so KOReader finishes loading first).
     self:setKeepAwake(true, true)
+    self:startKeepAwakeHeartbeat()
     UIManager:scheduleIn(5, function()
         if not self.image_widget then
             self:startAutoRefresh()
@@ -883,7 +885,33 @@ Automatically deletes old image file to prevent accumulation.
 @tparam table response API response containing image_url and filename
 @treturn string|nil Path to image file, or nil on download failure
 ]]
+--[[--
+The server says which way its pages are drawn ("orientation": "landscape" and
+"landscape_side": "cw"/"ccw"). Turn the Kindle's screen to match, once; KOReader then
+lays out taps, the battery corner and the image for that direction by itself.
+"portrait" leaves your own rotation setting alone.
+]]
+function TrmnlDisplay:applyOrientation(orientation, side)
+    if orientation ~= "landscape" then
+        return
+    end
+    local mode = (side == "ccw") and Screen.DEVICE_ROTATED_COUNTER_CLOCKWISE or Screen.DEVICE_ROTATED_CLOCKWISE
+    if not mode or Screen:getRotationMode() == mode then
+        return
+    end
+    logger.info("TRMNL: Turning the screen to landscape, mode", mode)
+    UIManager:broadcastEvent(Event:new("SetRotationMode", mode))
+    if Screen:getRotationMode() ~= mode then
+        Screen:setRotationMode(mode)
+    end
+end
+
 function TrmnlDisplay:downloadImageIfNeeded(response)
+    if response.orientation then
+        self.settings.orientation = response.orientation
+        self.settings.landscape_side = response.landscape_side
+        self:applyOrientation(response.orientation, response.landscape_side)
+    end
     -- One entry per page. Servers without `pages` (normal TRMNL) give a single page.
     local pages = response.pages
     if type(pages) ~= "table" or #pages == 0 then
@@ -924,7 +952,28 @@ function TrmnlDisplay:downloadImageIfNeeded(response)
         end
     end
 
+    -- Stay on the page you were looking at. Pages are matched by name ("Huron",
+    -- "Perso"...) because the number of pages can change when a list grows.
+    local titles = {}
+    for i, page in ipairs(pages) do
+        titles[i] = page.title
+    end
+    local want = self.page_titles and self.page_index and self.page_titles[self.page_index]
+    if want then
+        local base_name = want:gsub(" %d+$", "")      -- "Huron 2" gone? go to "Huron"
+        local found
+        for i, t in ipairs(titles) do
+            if t == want then found = i break end
+        end
+        if not found then
+            for i, t in ipairs(titles) do
+                if t == base_name then found = i break end
+            end
+        end
+        if found then self.page_index = found end
+    end
     self.page_paths = paths
+    self.page_titles = titles
     self.pages_changed = changed
     if not self.page_index or self.page_index > #paths then
         self.page_index = 1
@@ -960,7 +1009,7 @@ always rests on "Today".
 ]]
 function TrmnlDisplay:scheduleReturnHome()
     self:cancelReturnHome()
-    if (self.page_index or 1) == 1 then
+    if (self.page_index or 1) == 1 or (self.CONSTANTS.TIMING.RETURN_HOME_SECONDS or 0) <= 0 then
         return
     end
     self.return_home_task = function()
@@ -1309,6 +1358,25 @@ Keep the device awake while the dashboard runs (same mechanism as KOReader's
 other devices, pause KOReader's autosuspend. Turned off again when the
 dashboard stops, so normal reading isn't affected.
 ]]
+--[[--
+The Kindle sometimes forgets "prevent screensaver" (after USB, Wi-Fi changes or a
+framework hiccup) and then sleeps after ~10 min, which this Kindle can't wake from.
+So repeat it every 4 minutes, and also reset the Kindle's idle timer each time.
+]]
+function TrmnlDisplay:startKeepAwakeHeartbeat()
+    if self.keep_awake_task then
+        UIManager:unschedule(self.keep_awake_task)
+    end
+    self.keep_awake_task = function()
+        self:setKeepAwake(true, true)
+        if Device:isKindle() then
+            os.execute("lipc-set-prop com.lab126.powerd touchScreenSaverTimeout 1 2>/dev/null")
+        end
+        UIManager:scheduleIn(240, self.keep_awake_task)
+    end
+    UIManager:scheduleIn(240, self.keep_awake_task)
+end
+
 function TrmnlDisplay:setKeepAwake(on, force)
     if self.keep_awake == on and not force then
         return
@@ -1318,7 +1386,7 @@ function TrmnlDisplay:setKeepAwake(on, force)
     if Device:isKindle() then
         os.execute("lipc-set-prop com.lab126.powerd preventScreenSaver " .. (on and "1" or "0"))
     end
-    logger.info("TRMNL: Keep awake", on and "ON" or "OFF")
+    logger.dbg("TRMNL: Keep awake", on and "ON" or "OFF")
 end
 
 --[[--
@@ -1352,6 +1420,7 @@ function TrmnlDisplay:showCachedNow()
         return false
     end
     self.page_index = 1
+    self:applyOrientation(self.settings.orientation, self.settings.landscape_side)
     local ok = self:displayImage(paths[1])
     logger.info("TRMNL: Showing last saved screen while fetching", ok ~= false and "ok" or "failed")
     return ok ~= false
