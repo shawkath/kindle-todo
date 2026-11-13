@@ -51,6 +51,8 @@ jobs:
           ASANA_TOKEN: ${{ secrets.ASANA_TOKEN }}
           ASANA_LIST: ${{ vars.ASANA_LIST || 'Asana' }}
           ASANA_EVERYWHERE: ${{ vars.ASANA_EVERYWHERE }}
+          LAYOUT: ${{ vars.LAYOUT || 'landscape' }}
+          LANDSCAPE_SIDE: ${{ vars.LANDSCAPE_SIDE || 'cw' }}
         run: python render.py
 
       - name: Save overdue history
