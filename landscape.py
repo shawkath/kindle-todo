@@ -20,19 +20,19 @@ import render as R
 W, H, M = 800, 600, 20
 BLACK, DARK, MID, LIGHT, PALE, WHITE = 0, 40, 75, 190, 232, 255
 f = R.font
-T_TITLE = f("bold", 24)
-T_DATE = f("regular", 18)
-T_LABEL = f("semibold", 13)
-T_META = f("regular", 14)
-T_META_B = f("semibold", 14)
-T_MED_B = f("bold", 20)
-T_STAT = f("bold", 26)
-T_BIG = f("bold", 34)
-ROW_SIZES = [18, 17, 16, 15, 14, 13, 12]
-ROW_H = 30
-HEAD_H = 28
-TOP_Y = 60
-BOTTOM = H - 42
+T_TITLE = f("bold", 26)
+T_DATE = f("regular", 20)
+T_LABEL = f("semibold", 15)
+T_META = f("regular", 16)
+T_META_B = f("semibold", 16)
+T_MED_B = f("bold", 22)
+T_STAT = f("bold", 28)
+T_BIG = f("bold", 36)
+ROW_SIZES = [20, 19, 18, 17, 16, 15, 14, 13, 12]
+ROW_H = 33
+HEAD_H = 30
+TOP_Y = 66
+BOTTOM = H - 46
 DAY_END = int(os.environ.get("DAY_END") or 23)          # "day left" counts down to this hour
 LIST_MAX_PAGES = int(os.environ.get("LIST_MAX_PAGES") or 3)
 HIST_DIR = R.HERE / "history"
@@ -131,10 +131,10 @@ def new_page(book, family, title=None, sub=None, part=None):
     if extra:
         d.text((x, 21), extra, font=T_META_B, fill=BLACK)
     # top-right 130px stays empty: the Kindle draws battery + Wi-Fi there
-    d.line((M, 52, W - M, 52), fill=BLACK, width=2)
+    d.line((M, 56, W - M, 56), fill=BLACK, width=2)
 
     # footer: every page family by name, current one inverted
-    d.line((M, H - 34, W - M, H - 34), fill=LIGHT, width=1)
+    d.line((M, H - 38, W - M, H - 38), fill=LIGHT, width=1)
     fx = M
     missed_n = len(p["missed"])
     for name in book.families:
@@ -143,15 +143,15 @@ def new_page(book, family, title=None, sub=None, part=None):
             txt += f" {part[0]}/{part[1]}"
         pw = tw(d, txt, T_META_B) + 12
         if name == family:
-            d.rectangle((fx, H - 28, fx + pw, H - 8), fill=BLACK)
-            d.text((fx + 6, H - 26), txt, font=T_META_B, fill=WHITE)
+            d.rectangle((fx, H - 31, fx + pw, H - 8), fill=BLACK)
+            d.text((fx + 6, H - 29), txt, font=T_META_B, fill=WHITE)
         else:
-            d.text((fx + 6, H - 26), txt, font=T_META_B, fill=DARK)
+            d.text((fx + 6, H - 29), txt, font=T_META_B, fill=DARK)
         fx += pw + 2
     if R.SYNCED_AT:
         s = "synced " + R.clock(R.SYNCED_AT.time())
         if fx + tw(d, s, T_META_B) + 10 < W - M:
-            d.text((W - M - tw(d, s, T_META_B), H - 26), s, font=T_META_B, fill=BLACK)
+            d.text((W - M - tw(d, s, T_META_B), H - 29), s, font=T_META_B, fill=BLACK)
     return img, d
 
 
@@ -169,7 +169,7 @@ def task_row(d, y, title, meta="", marker="check", n=None, bold=False, chip=None
     """One task, one line, full text."""
     x = M
     if marker == "check":
-        d.rectangle((x, y + 8, x + 13, y + 21), outline=BLACK, width=2)
+        d.rectangle((x, y + 9, x + 14, y + 23), outline=BLACK, width=2)
         tx = x + 22
     elif marker == "number":
         d.rectangle((x, y + 4, x + 22, y + 26), fill=BLACK)
@@ -188,7 +188,7 @@ def task_row(d, y, title, meta="", marker="check", n=None, bold=False, chip=None
         d.text((W - M - right_w - mw, y + 8), meta, font=T_META, fill=DARK)
         right_w += mw
     ft = row_font(d, title, W - M - right_w - 16 - tx, bold)
-    d.text((tx, y + 5 + (18 - ft.size) // 2), title, font=ft, fill=BLACK)
+    d.text((tx, y + 5 + (20 - ft.size) // 2), title, font=ft, fill=BLACK)
     return y + ROW_H
 
 
@@ -364,29 +364,29 @@ def page_today(book, p, hist, tr):
     now, today = p["now"], p["today"]
     img, d = new_page(book, "Today")
     # ---- insight band (numbers only)
-    y, th, gap = TOP_Y, 62, 10
+    y, th, gap = TOP_Y, 68, 10
     tw_ = (W - 2 * M - 3 * gap) / 4
     left = day_left(now)
     x0 = M
     d.rectangle((x0, y, x0 + tw_, y + th), outline=BLACK, width=2)
     d.text((x0 + 10, y + 6), "DAY LEFT", font=T_LABEL, fill=DARK)
     s = hm(left)
-    d.text((x0 + 10, y + 21), s, font=T_STAT, fill=BLACK)
+    d.text((x0 + 10, y + 23), s, font=T_STAT, fill=BLACK)
     bx0 = x0 + 18 + tw(d, s, T_STAT)
     if bx0 < x0 + tw_ - 30:
         total = (DAY_END - 7) * 60
-        d.rectangle((bx0, y + 32, x0 + tw_ - 10, y + 44), outline=BLACK, width=2)
+        d.rectangle((bx0, y + 36, x0 + tw_ - 10, y + 48), outline=BLACK, width=2)
         done_w = (x0 + tw_ - 10 - bx0) * min(1, max(0, 1 - left / total))
-        d.rectangle((bx0, y + 32, bx0 + max(3, done_w), y + 44), fill=BLACK)
+        d.rectangle((bx0, y + 36, bx0 + max(3, done_w), y + 48), fill=BLACK)
 
     x0 += tw_ + gap
     d.rectangle((x0, y, x0 + tw_, y + th), outline=BLACK, width=2)
     d.text((x0 + 10, y + 6), "TODAY'S WORK", font=T_LABEL, fill=DARK)
     s = hm(planned_minutes(p["today_all"]))
-    d.text((x0 + 10, y + 21), s, font=T_STAT, fill=BLACK)
+    d.text((x0 + 10, y + 23), s, font=T_STAT, fill=BLACK)
     small = f"{len(p['today_all'])} tasks"
     if x0 + 18 + tw(d, s, T_STAT) + tw(d, small, T_META_B) < x0 + tw_ - 6:
-        d.text((x0 + 18 + tw(d, s, T_STAT), y + 31), small, font=T_META_B, fill=BLACK)
+        d.text((x0 + 18 + tw(d, s, T_STAT), y + 34), small, font=T_META_B, fill=BLACK)
 
     x0 += tw_ + gap
     d.rectangle((x0, y, x0 + tw_, y + th), outline=BLACK, width=2)
@@ -409,44 +409,44 @@ def page_today(book, p, hist, tr):
     d.rectangle((x0, y, x0 + tw_, y + th), outline=BLACK, width=2)
     d.text((x0 + 10, y + 6), "CLEARED · LATE", font=T_LABEL, fill=DARK)
     c = tr["cleared"].get(today.isoformat(), 0)
-    d.text((x0 + 10, y + 21), str(c), font=T_STAT, fill=BLACK)
-    d.text((x0 + 16 + tw(d, str(c), T_STAT), y + 31), "done", font=T_META_B, fill=BLACK)
+    d.text((x0 + 10, y + 23), str(c), font=T_STAT, fill=BLACK)
+    d.text((x0 + 16 + tw(d, str(c), T_STAT), y + 34), "done", font=T_META_B, fill=BLACK)
     late = len(p["missed"])
     lx = x0 + tw_ / 2 + 4
-    d.text((lx, y + 21), str(late), font=T_STAT, fill=BLACK)
+    d.text((lx, y + 23), str(late), font=T_STAT, fill=BLACK)
     week_ago = (hist or {}).get((today - dt.timedelta(days=7)).isoformat())
     if week_ago is not None and week_ago != late:
         arrow = f"▼{week_ago - late}" if late < week_ago else f"▲{late - week_ago}"
-        d.text((lx + 6 + tw(d, str(late), T_STAT), y + 31), arrow, font=T_META_B, fill=BLACK)
+        d.text((lx + 6 + tw(d, str(late), T_STAT), y + 34), arrow, font=T_META_B, fill=BLACK)
     else:
-        d.text((lx + 6 + tw(d, str(late), T_STAT), y + 31), "late", font=T_META_B, fill=BLACK)
+        d.text((lx + 6 + tw(d, str(late), T_STAT), y + 34), "late", font=T_META_B, fill=BLACK)
 
     # ---- do this now (the one black element)
     y += th + 10
     top = do_now(p)
-    bar_h = 36
+    bar_h = 40
     step = top.get("step") if top else None
     if step:
-        bar_h = 58
+        bar_h = 66
     d.rectangle((M, y, W - M, y + bar_h), fill=BLACK)
     d.text((M + 10, y + 11), "DO THIS NOW", font=T_LABEL, fill=LIGHT)
     if top:
         meta = meta_for(top, today)
         mw = tw(d, meta, T_META)
         d.text((W - M - 10 - mw, y + 10), meta, font=T_META, fill=LIGHT)
-        avail = W - M - 10 - mw - 16 - (M + 112)
+        avail = W - M - 10 - mw - 16 - (M + 124)
         ft = T_MED_B
-        for s_ in (20, 19, 18, 17, 16, 15, 14, 13, 12):
+        for s_ in (22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12):
             ft = f("bold", s_)
             if tw(d, top["title"], ft) <= avail:
                 break
-        d.text((M + 112, y + 7 + (20 - ft.size) // 2), top["title"], font=ft, fill=WHITE)
+        d.text((M + 124, y + 7 + (22 - ft.size) // 2), top["title"], font=ft, fill=WHITE)
         if step:
-            d.text((M + 10, y + 36), "FIRST STEP", font=T_LABEL, fill=LIGHT)
-            sf = row_font(d, step, W - 2 * M - 112 - 10)
-            d.text((M + 112, y + 34), step, font=sf, fill=WHITE)
+            d.text((M + 10, y + 41), "FIRST STEP", font=T_LABEL, fill=LIGHT)
+            sf = row_font(d, step, W - 2 * M - 124 - 10)
+            d.text((M + 124, y + 39), step, font=sf, fill=WHITE)
     else:
-        d.text((M + 112, y + 7), "Nothing urgent. Pick something from Energy.", font=T_MED_B, fill=WHITE)
+        d.text((M + 124, y + 7), "Nothing urgent. Pick something from Energy.", font=T_MED_B, fill=WHITE)
     y += bar_h + 8
 
     # ---- the rest, shared fairly
@@ -574,8 +574,8 @@ def page_energy(book, p):
         for b in range(3):
             bx = M + 10 + b * 12
             d.rectangle((bx, y + 10, bx + 8, y + 24), fill=fg if b < bars else (MID if hl else LIGHT))
-        d.text((M + 56, y + 7), name, font=f("bold", 18), fill=fg)
-        d.text((M + 64 + tw(d, name, f("bold", 18)), y + 10), f"{desc} · {len(items)}", font=T_META, fill=sub)
+        d.text((M + 56, y + 7), name, font=f("bold", 20), fill=fg)
+        d.text((M + 64 + tw(d, name, f("bold", 20)), y + 10), f"{desc} · {len(items)}", font=T_META, fill=sub)
         if items:
             vals = sorted({R.minutes_of(i) or R.DEFAULT_MINUTES[k] for i in items[:r]})
             size = ("~" + span(vals[0]) + " each") if len(vals) == 1 else f"{span(vals[0])} – {span(vals[-1])}"
@@ -627,14 +627,16 @@ def page_insights(book, p, hist, tr, lists):
     tiles = [("DAY LEFT", hm(left), f"until {DAY_END % 12 or 12}{'pm' if DAY_END >= 12 else 'am'}"),
              ("PLANNED TODAY", hm(planned), f"{len(p['today_all'])} tasks"),
              ("SPARE AFTER THAT", hm(max(0, left - planned)),
-              "over-planned!" if planned > left else "if you start now")]
+              "over-planned!" if planned > left else "free")]
     for k, (lab, big, small) in enumerate(tiles):
         x0 = M + k * (tw_ + gap)
-        d.rectangle((x0, y, x0 + tw_, y + 62), outline=BLACK, width=2)
+        d.rectangle((x0, y, x0 + tw_, y + 68), outline=BLACK, width=2)
         d.text((x0 + 10, y + 6), lab, font=T_LABEL, fill=DARK)
-        d.text((x0 + 10, y + 21), big, font=T_STAT, fill=BLACK)
-        d.text((x0 + 18 + tw(d, big, T_STAT), y + 31), small, font=T_META_B, fill=BLACK)
-    y += 72
+        d.text((x0 + 10, y + 23), big, font=T_STAT, fill=BLACK)
+        sx = x0 + 18 + tw(d, big, T_STAT)
+        if sx + tw(d, small, T_META_B) <= x0 + tw_ - 6:      # only if it fits inside the tile
+            d.text((sx, y + 34), small, font=T_META_B, fill=BLACK)
+    y += 78
     nxt = sorted([i for i in p["today_all"] if i["due"][1] and i["due"][1] > now.time()],
                  key=lambda i: i["due"][1])
     if nxt:
@@ -714,9 +716,9 @@ def page_insights(book, p, hist, tr, lists):
     parts = [f"Cleared today: {c_today}", f"this week: {c_week}"]
     if best and best[1]:
         parts.append(f"best day: {dt.date.fromisoformat(best[0]):%a} ({best[1]})")
-    d.rectangle((M, y, W - M, y + 32), outline=BLACK, width=2)
+    d.rectangle((M, y, W - M, y + 34), outline=BLACK, width=2)
     d.text((M + 10, y + 7), "PROGRESS", font=T_LABEL, fill=DARK)
-    d.text((M + 90, y + 6), "   ·   ".join(parts), font=T_META_B, fill=BLACK)
+    d.text((M + 22 + tw(d, "PROGRESS", T_LABEL), y + 6), "   ·   ".join(parts), font=T_META_B, fill=BLACK)
     y += 42
 
     # ---- avoiding
@@ -737,7 +739,7 @@ def page_insights(book, p, hist, tr, lists):
     # ---- balance across lists
     if lists and y + 30 <= BOTTOM:
         d.text((M, y + 6), "BALANCE", font=T_LABEL, fill=DARK)
-        x = M + 74
+        x = M + 12 + tw(d, "BALANCE", T_LABEL)
         for name, items in lists:
             lt = sum(1 for i in items if i["due"] and i["due"][0] < today)
             chip = f"{name} {len(items)}" + (f" · {lt} late" if lt else "")
@@ -778,7 +780,7 @@ def message_page(now, title, lines):
     img = Image.new("L", (W, H), WHITE)
     d = ImageDraw.Draw(img)
     d.text((M, 12), now.strftime("%A %d %b").replace(" 0", " "), font=T_TITLE, fill=BLACK)
-    d.line((M, 52, W - M, 52), fill=BLACK, width=2)
+    d.line((M, 56, W - M, 56), fill=BLACK, width=2)
     d.text((M, 180), title, font=T_BIG, fill=BLACK)
     y = 236
     for ln in lines:
