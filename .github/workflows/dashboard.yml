@@ -63,7 +63,7 @@ jobs:
           path: history
           key: overdue-history-${{ github.run_id }}
 
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v4
         with:
           path: site
           retention-days: 1
