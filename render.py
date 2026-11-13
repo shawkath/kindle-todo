@@ -56,6 +56,8 @@ REFRESH = int(os.environ.get("REFRESH_SECONDS") or 3600)
 WEEK_MODE = (os.environ.get("WEEK") or "calendar").lower()
 # Night mode: "22-6" = Kindle turns Wi-Fi off from 10pm and wakes at 6am. "off" disables it.
 QUIET_HOURS = (os.environ.get("QUIET_HOURS") or "22-6").strip().lower()
+# "landscape" = 800x600 pages, one line per task (landscape.py); anything else = the portrait pages
+LAYOUT = (os.environ.get("LAYOUT") or "portrait").strip().lower()
 # page 6: these TickTick lists, top 5 + everything else, whatever the date
 FOCUS_LISTS = [w.strip() for w in (os.environ.get("FOCUS_LISTS") or "Huron,Perso,eNoor").split(",") if w.strip()]
 # Asana: open tasks assigned to you, shown as their own list page (sections = Asana projects)
@@ -207,6 +209,7 @@ def fetch_asana(token, list_name):
     for t in raw:
         proj = (t.get("projects") or [{}])[0].get("name") or ""
         task = {
+            "id": "asana:" + str(t.get("gid") or ""),
             "title": t.get("name") or "",
             "priority": 0,
             "tags": [g.get("name") for g in t.get("tags") or [] if g.get("name")],
@@ -226,6 +229,21 @@ def fetch_asana(token, list_name):
 
 
 # ---------------------------------------------------------------- planning
+def first_step(t):
+    """A tiny first step for the 'Do this now' bar: the first unticked checklist item,
+    else the first short line of the task's notes."""
+    for it in t.get("items") or []:
+        if it.get("status", 0) == 0 and (it.get("title") or "").strip():
+            return " ".join(it["title"].split())
+    for line in (t.get("content") or "").splitlines():
+        line = line.strip().lstrip("-*•").strip()
+        if line.startswith("[ ]"):
+            line = line[3:].strip()
+        if 3 <= len(line) <= 90 and not line.startswith(("http", "[x]")):
+            return line
+    return None
+
+
 def parse_ts(raw):
     """Parse TickTick timestamps in any of the shapes it sends:
     2026-10-22T18:30:00+0000, 2026-10-22T18:30:00.000+0000, ...Z, ...+00:00"""
@@ -343,6 +361,8 @@ def plan(tasks, now):
     next_end = end + dt.timedelta(days=7)
 
     items = [{"title": " ".join((t.get("title") or "").split()) or "No title",
+              "id": t.get("id"),
+              "step": first_step(t),
               "section": clean(t.get("_section") or ""),
               "section_pos": t.get("_section_pos", 999),
               "order": t.get("sortOrder") or 0,
@@ -1305,7 +1325,7 @@ def render_message(now, title, body_lines):
 
 
 # ---------------------------------------------------------------- output
-def write_site(images, base_url, dash_path, sleep_until=None):
+def write_site(images, base_url, dash_path, sleep_until=None, titles=None):
     """Write one PNG per page plus api/display.
 
     api/display keeps the original single-screen fields (image_url/filename =
@@ -1325,7 +1345,10 @@ def write_site(images, base_url, dash_path, sleep_until=None):
         digest = hashlib.sha1(tmp.read_bytes()).hexdigest()[:12]
         name = f"p{k}-{digest}.png"
         tmp.rename(out / name)
-        title = PAGES[k - 1] if len(PAGES) == len(images) else f"Page {k}"
+        if titles and len(titles) == len(images):
+            title = titles[k - 1]
+        else:
+            title = PAGES[k - 1] if len(PAGES) == len(images) else f"Page {k}"
         pages.append({"image_url": f"{base_url.rstrip('/')}/{dash_path}/{name}", "filename": name,
                       "title": title})
         print("wrote", out / name)
@@ -1336,6 +1359,8 @@ def write_site(images, base_url, dash_path, sleep_until=None):
         "refresh_rate": REFRESH,
         "sleep_until": sleep_until,
         "pages": pages,
+        "orientation": "landscape" if LAYOUT == "landscape" else "portrait",
+        "landscape_side": (os.environ.get("LANDSCAPE_SIDE") or "cw").strip().lower(),
     }
     (out / "api" / "display").write_text(json.dumps(payload))
 
@@ -1391,6 +1416,14 @@ def main():
         now = dt.datetime.fromisoformat(sys.argv[sys.argv.index("--now") + 1]).replace(tzinfo=TZ)
     SYNCED_AT = now
 
+    if "--demo" in sys.argv and (LAYOUT == "landscape" or "--landscape" in sys.argv):
+        import landscape as L
+        imgs, titles, _ = L.render_all(plan(demo_tasks(), now), {})
+        for k, img in enumerate(imgs, 1):
+            img.save(HERE / f"preview-L{k}.png")
+            print("wrote", HERE / f"preview-L{k}.png", titles[k - 1])
+        return
+
     if "--demo" in sys.argv:
         for k, img in enumerate(render_pages(plan(demo_tasks(), now)), 1):
             img.save(HERE / f"preview-{k}.png")
@@ -1424,26 +1457,34 @@ def main():
         print(f"today: {p['n_today']}, yesterday: {len(p['yesterday'])}, missed: {len(p['missed'])}, "
               f"rest of week: {len(p['this_week'])}, next week: {len(p['next_week'])}, "
               f"later: {len(p['later'])}, no date: {len(p['undated'])}  (as of {now:%a %d %b %H:%M})")
-        images = render_pages(p, update_history(p))
+        hist = update_history(p)
+        titles = None
+        if LAYOUT == "landscape":
+            import landscape as L
+            images, titles, families = L.render_all(p, hist)
+        else:
+            images = render_pages(p, hist)
         wake = quiet_window(now)
         if wake:
-            images[0] = page_night(p, wake)
+            images[0] = L.page_night(p, wake, families) if titles else page_night(p, wake)
     except TokenError:
-        img = render_message(now, "Reconnect TickTick", [
+        titles = None
+        err = ("Reconnect TickTick", [
             "Your TickTick access token has expired or was revoked.",
             "Run get-token.ps1 again and update the TICKTICK_TOKEN secret on GitHub.",
         ])
-        images = [img] * len(PAGES)
+        images = [render_message(now, *err)] * len(PAGES)
     except Exception as e:
+        titles = None
         print("error:", repr(e), file=sys.stderr)
-        img = render_message(now, "Couldn't reach TickTick", [
-            "Will retry on the next refresh.",
-            f"Details: {type(e).__name__}",
-        ])
-        images = [img] * len(PAGES)
+        err = ("Couldn't reach TickTick", ["Will retry on the next refresh.", f"Details: {type(e).__name__}"])
+        images = [render_message(now, *err)] * len(PAGES)
 
+    if titles is None and LAYOUT == "landscape":       # error page in landscape too
+        import landscape as L
+        images, titles = [L.message_page(now, *err)], ["Today"]
     wake = quiet_window(now)
-    write_site(images, base_url, dash_path, int(wake.timestamp()) if wake else None)
+    write_site(images, base_url, dash_path, int(wake.timestamp()) if wake else None, titles)
 
 
 if __name__ == "__main__":
