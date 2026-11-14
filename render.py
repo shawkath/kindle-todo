@@ -59,7 +59,7 @@ QUIET_HOURS = (os.environ.get("QUIET_HOURS") or "22-6").strip().lower()
 # "landscape" = 800x600 pages, one line per task (landscape.py); anything else = the portrait pages
 LAYOUT = (os.environ.get("LAYOUT") or "portrait").strip().lower()
 # page 6: these TickTick lists, top 5 + everything else, whatever the date
-FOCUS_LISTS = [w.strip() for w in (os.environ.get("FOCUS_LISTS") or "Huron,Perso,eNoor").split(",") if w.strip()]
+FOCUS_LISTS = [w.strip() for w in (os.environ.get("FOCUS_LISTS") or "Huron,Perso,eNoor,BuyPalz").split(",") if w.strip()]
 # Asana: open tasks assigned to you, shown as their own list page (sections = Asana projects)
 ASANA_TOKEN = (os.environ.get("ASANA_TOKEN") or "").strip()
 ASANA_LIST = (os.environ.get("ASANA_LIST") or "Asana").strip()
