@@ -50,7 +50,8 @@ jobs:
           FOCUS_LISTS: ${{ vars.FOCUS_LISTS || 'Huron,Perso,eNoor' }}
           ASANA_TOKEN: ${{ secrets.ASANA_TOKEN }}
           ASANA_LIST: ${{ vars.ASANA_LIST || 'Asana' }}
-          ASANA_PROJECTS: ${{ vars.ASANA_PROJECTS || 'TrueDime' }}
+          ASANA_WORKSPACES: ${{ vars.ASANA_WORKSPACES || 'TrueDime' }}
+          ASANA_PROJECTS: ${{ vars.ASANA_PROJECTS || 'all' }}
           ASANA_EVERYWHERE: ${{ vars.ASANA_EVERYWHERE }}
           LAYOUT: ${{ vars.LAYOUT || 'landscape' }}
           LANDSCAPE_SIDE: ${{ vars.LANDSCAPE_SIDE || 'cw' }}
