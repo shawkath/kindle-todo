@@ -64,7 +64,11 @@ FOCUS_LISTS = [w.strip() for w in (os.environ.get("FOCUS_LISTS") or "Huron,Perso
 ASANA_TOKEN = (os.environ.get("ASANA_TOKEN") or "").strip()
 ASANA_LIST = (os.environ.get("ASANA_LIST") or "Asana").strip()
 # only these Asana projects (comma-separated); "all" = every project
-ASANA_PROJECTS = [w.strip() for w in (os.environ.get("ASANA_PROJECTS") or "TrueDime").split(",")
+# only this Asana workspace ("account"); "all" = every workspace your token can see
+ASANA_WORKSPACES = [w.strip() for w in (os.environ.get("ASANA_WORKSPACES") or "TrueDime").split(",")
+                    if w.strip() and w.strip().lower() != "all"]
+ASANA_WS_SHOWN = []        # filled in by fetch_asana: the workspace names actually read (for the page header)
+ASANA_PROJECTS = [w.strip() for w in (os.environ.get("ASANA_PROJECTS") or "all").split(",")
                   if w.strip() and w.strip().lower() != "all"]
 ASANA_EVERYWHERE = (os.environ.get("ASANA_EVERYWHERE") or "").strip().lower() in ("1", "yes", "true", "on")
 if ASANA_TOKEN and ASANA_LIST.lower() not in [f.lower() for f in FOCUS_LISTS]:
@@ -198,7 +202,14 @@ def fetch_asana(token, list_name):
     me = asana_get("/users/me?opt_fields=workspaces.name", token)["data"]
     raw = []
     fields = "name,due_on,due_at,projects.name,memberships.project.name,memberships.section.name,tags.name,completed"
-    for ws in me.get("workspaces") or []:
+    wanted_ws = [w.lower() for w in ASANA_WORKSPACES]
+    all_ws = me.get("workspaces") or []
+    workspaces = [w for w in all_ws if not wanted_ws or (w.get("name") or "").lower() in wanted_ws]
+    if not workspaces:
+        print(f"warning: no Asana workspace named {', '.join(ASANA_WORKSPACES)}; your token sees: "
+              f"{', '.join(w.get('name') or '?' for w in all_ws)}", file=sys.stderr)
+    ASANA_WS_SHOWN[:] = [w.get("name") or "" for w in workspaces]
+    for ws in workspaces:
         offset = None
         while True:
             q = (f"/tasks?assignee=me&workspace={ws['gid']}&completed_since=now"
@@ -217,7 +228,7 @@ def fetch_asana(token, list_name):
             name = (pr.get("name") or "").strip()
             if not wanted or name.lower() in wanted:
                 return name
-        return ""
+        return "" if wanted else "No project"     # with every project shown, keep project-less tasks too
 
     kept = [(t, project_of(t)) for t in raw]
     kept = [(t, pr) for t, pr in kept if pr]
@@ -260,8 +271,10 @@ def fetch_asana(token, list_name):
             task["isAllDay"] = True
             task["timeZone"] = str(TZ)
         out.append((task, list_name))
+    print(f"asana: workspace {', '.join(ASANA_WS_SHOWN) or '-'} (token sees: "
+          f"{', '.join(w.get('name') or '?' for w in all_ws)})")
     print(f"asana: {len(out)} open tasks assigned to you in {', '.join(ASANA_PROJECTS) or 'all projects'}"
-          f" ({len(raw) - len(out)} in other projects ignored)")
+          f" ({len(raw) - len(out)} ignored)")
     return out
 
 
