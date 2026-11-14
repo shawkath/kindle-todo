@@ -19,6 +19,7 @@ import render as R
 
 W, H, M = 800, 600, 20
 BLACK, DARK, MID, LIGHT, PALE, WHITE = 0, 40, 75, 190, 232, 255
+GREY_LINE = 150          # card borders: visible but quiet
 f = R.font
 T_TITLE = f("bold", 26)
 T_DATE = f("semibold", 20)
@@ -641,14 +642,17 @@ def page_list(book, p, name, items):
 
 
 def page_insights(book, p, hist, tr, lists):
-    """Insights: a calm, modern summary you can read in 5 seconds.
-      headline  ->  4 compact stats  ->  2 charts (wins, late pile)
-      ->  done today (names, for the dopamine) | your lists (mini bars)
-      ->  ONE next best move (the only black element)."""
+    """Insights as a tidy grid of cards (easy to follow on e-ink):
+        headline
+        [done today] [streak] [this week] [late]
+        [wins, last 7 days]      [late pile, last 7 days]
+        [today's wins]           [your lists]
+        ███ one next best move ███"""
     now, today = p["now"], p["today"]
     img, d = new_page(book, "Insights")
     hist = hist or {}
     cl = tr["cleared"]
+    first_day = min((dt.date.fromisoformat(k) for k in cl), default=today)   # tracking started
     done_n = cl.get(today.isoformat(), 0)
     yday_done = cl.get((today - dt.timedelta(days=1)).isoformat())
     week_total = sum(cl.get((today - dt.timedelta(days=k)).isoformat(), 0) for k in range(7))
@@ -661,8 +665,19 @@ def page_insights(book, p, hist, tr, lists):
     streak, best_streak = streaks(cl, today)
     best_day = max(cl.values(), default=0)
     W2 = W - 2 * M
+    GAP = 10
+    PAD = 12
+    T_CAP = f("semibold", 14)
+    T_NOTE = f("semibold", 15)
 
-    # ---------- headline
+    def card(x0, y0, x1, y1, title=None, note=None):
+        d.rounded_rectangle((x0, y0, x1, y1), radius=8, outline=GREY_LINE, width=2)
+        if title:
+            d.text((x0 + PAD, y0 + 8), title, font=T_CAP, fill=DARK)
+        if note:
+            d.text((x1 - PAD - tw(d, note, T_NOTE), y0 + 7), note, font=T_NOTE, fill=BLACK)
+
+    # ---------- headline (no card: it's the page's voice)
     if done_n >= 5:
         head = f"Strong day: {done_n} done."
     elif done_n:
@@ -675,150 +690,135 @@ def page_insights(book, p, hist, tr, lists):
     elif nxt:
         sub = f"{n_today} task{'s' if n_today != 1 else ''} today · next fixed: {R.clock(nxt[0]['due'][1])} {nxt[0]['title']}"
     else:
-        sub = f"{n_today} task{'s' if n_today != 1 else ''} today · {hm(left)} of day left · no fixed times"
-    y = TOP_Y
-    hf = f("bold", 24)
+        sub = f"{n_today} task{'s' if n_today != 1 else ''} today · {hm(left)} of day left"
+    y = TOP_Y - 2
+    hf = f("bold", 23)
     if tw(d, head, hf) > W2:
         hf = row_font(d, head, W2, bold=True)
     d.text((M, y), head, font=hf, fill=BLACK)
-    d.text((M, y + 32), sub, font=row_font(d, sub, W2), fill=DARK)
-    y += 66
+    d.text((M, y + 30), sub, font=row_font(d, sub, W2) if tw(d, sub, T_META) > W2 else T_META, fill=DARK)
+    y += 58
 
-    # ---------- 4 compact stats: label / number + short note on one baseline
-    T_NUM = f("bold", 30)
-    T_NOTE = f("semibold", 15)
-    stats = []
+    # ---------- 4 stat cards
+    sh = 64
+    cw = (W2 - 3 * GAP) / 4
+    T_NUM = f("bold", 28)
     n1 = ("best day!" if done_n and done_n >= best_day else
           f"+{done_n - yday_done} vs yday" if yday_done is not None and done_n > yday_done else "")
-    stats.append(("DONE TODAY", str(done_n), n1))
     n2 = ("best ever!" if streak and streak >= best_streak else
           "keep it today" if streak and done_n == 0 else
           f"best {best_streak}" if streak else "start one")
-    stats.append(("STREAK", f"{streak}d", n2))
     n3 = f"▲ {week_total - prev_week}" if prev_week and week_total > prev_week else ""
-    stats.append(("THIS WEEK", str(week_total), n3))
     n4 = ""
     if week_ago is not None and week_ago != late:
         n4 = f"▼ {week_ago - late}" if late < week_ago else f"▲ {late - week_ago}"
-    stats.append(("LATE", str(late), n4))
-    cw = W2 / 4
+    stats = [("DONE TODAY", str(done_n), n1), ("STREAK", f"{streak}d", n2),
+             ("THIS WEEK", str(week_total), n3), ("LATE", str(late), n4)]
     for k, (lab, num, note) in enumerate(stats):
-        x0 = M + k * cw + (0 if k == 0 else 14)
-        if k:
-            d.line((M + k * cw, y + 2, M + k * cw, y + 54), fill=LIGHT, width=1)
-        d.text((x0, y), lab, font=f("semibold", 14), fill=DARK)
-        d.text((x0, y + 18), num, font=T_NUM, fill=BLACK)
-        if note:
-            d.text((x0 + tw(d, num, T_NUM) + 8, y + 32), note, font=T_NOTE, fill=BLACK)
-    y += 66
+        x0 = M + k * (cw + GAP)
+        card(x0, y, x0 + cw, y + sh, lab)
+        d.text((x0 + PAD, y + 27), num, font=T_NUM, fill=BLACK)
+        if note and x0 + PAD + tw(d, num, T_NUM) + 8 + tw(d, note, T_NOTE) <= x0 + cw - 6:
+            d.text((x0 + PAD + tw(d, num, T_NUM) + 8, y + 39), note, font=T_NOTE, fill=BLACK)
+    y += sh + GAP
 
-    # ---------- two charts, solid bars, same language
-    ch_gap = 30
-    ch_w = (W2 - ch_gap) / 2
-    ch_h = 96
-
-    def chart(x0, title, note, vals, labels, highlight):
-        d.text((x0, y), title, font=f("semibold", 14), fill=DARK)
-        if note and tw(d, title, f("semibold", 14)) + 16 + tw(d, note, T_NOTE) <= ch_w:
-            d.text((x0 + ch_w - tw(d, note, T_NOTE), y), note, font=T_NOTE, fill=BLACK)
-        known = [v for v in vals if v is not None]
-        mx = max(known) if known else 1
-        mx = mx or 1
-        bw = ch_w / len(vals)
-        base = y + ch_h - 4
-        for k, v in enumerate(vals):
-            bx = x0 + k * bw
-            if v is not None:
-                h = max(3, (ch_h - 50) * v / mx) if v else 2
-                d.rectangle((bx + 8, base - h, bx + bw - 8, base), fill=BLACK if k == highlight else LIGHT)
-                s_ = str(v)
-                d.text((bx + bw / 2 - tw(d, s_, T_NOTE) / 2, base - h - 19), s_, font=T_NOTE,
-                       fill=BLACK)
-            lab = labels[k]
-            d.text((bx + bw / 2 - tw(d, lab, f("semibold", 13)) / 2, base + 3), lab, font=f("semibold", 13),
-                   fill=BLACK if k == highlight else DARK)
-
+    # ---------- 2 chart cards
+    chh = 122
+    hw = (W2 - GAP) / 2
     days7 = [today - dt.timedelta(days=6 - k) for k in range(7)]
-    wins = [cl.get(d0.isoformat(), 0) for d0 in days7]
-    chart(M, "WINS · LAST 7 DAYS", f"{sum(wins)} done", wins, [d0.strftime("%a")[:2] for d0 in days7], 6)
+
+    def chart(x0, title, note, vals):
+        card(x0, y, x0 + hw, y + chh, title, note)
+        known = [v for v in vals if v is not None]
+        mx = max(known + [1])
+        inner = hw - 2 * PAD
+        bw = inner / 7
+        base = y + chh - 24
+        for k, v in enumerate(vals):
+            bx = x0 + PAD + k * bw
+            lab = days7[k].strftime("%a")[:2]
+            today_bar = k == 6
+            d.text((bx + bw / 2 - tw(d, lab, f("semibold", 13)) / 2, base + 4), lab,
+                   font=f("semibold", 13), fill=BLACK if today_bar else DARK)
+            if v is None:                      # before tracking started: no bar, no number
+                continue
+            h = (chh - 66) * v / mx if v else 2
+            d.rectangle((bx + 7, base - h, bx + bw - 7, base), fill=BLACK if today_bar else LIGHT)
+            s_ = str(v)
+            d.text((bx + bw / 2 - tw(d, s_, T_NOTE) / 2, base - h - 19), s_, font=T_NOTE, fill=BLACK)
+
+    wins = [cl.get(d0.isoformat(), 0) if d0 >= first_day else None for d0 in days7]
+    chart(M, "WINS · LAST 7 DAYS", f"{sum(v or 0 for v in wins)} done", wins)
     lv = [hist.get(d0.isoformat()) for d0 in days7]
     lv[-1] = late
     known = [v for v in lv if v is not None]
     trend = ""
     if len(known) >= 2 and known[-1] != known[0]:
-        trend = f"▼ {known[0] - known[-1]} this week" if known[-1] < known[0] else f"▲ {known[-1] - known[0]} this week"
-    chart(M + ch_w + ch_gap, "LATE PILE · LAST 7 DAYS", trend, lv, [d0.strftime("%a")[:2] for d0 in days7], 6)
-    y += ch_h + 22
-    d.line((M, y, W - M, y), fill=LIGHT, width=1)
-    y += 10
+        trend = f"▼ {known[0] - known[-1]}" if known[-1] < known[0] else f"▲ {known[-1] - known[0]}"
+    if late == 0:
+        trend = "clean slate!"
+    chart(M + hw + GAP, "LATE PILE · LAST 7 DAYS", trend, lv)
+    y += chh + GAP
 
-    # ---------- bottom: done today (left) | your lists (right)
-    bar_h = 44
-    bar_y = BOTTOM - bar_h - 2
-    col_w = (W2 - ch_gap) / 2
-    lx, rx = M, M + col_w + ch_gap
-    area_bottom = bar_y - 8
-
-    # left: names of what you finished today
+    # ---------- bottom cards: today's wins | your lists
+    bar_h = 42
+    bar_y = BOTTOM - bar_h
+    bh = bar_y - GAP - y
     done_titles = [t for t in tr.get("done", {}).get(today.isoformat(), []) if t][::-1]
-    d.text((lx, y), "TODAY'S WINS", font=f("semibold", 14), fill=DARK)
-    if done_titles:
-        d.text((lx + col_w - tw(d, str(len(done_titles)), T_NOTE), y), str(len(done_titles)), font=T_NOTE, fill=BLACK)
-    yy = y + 24
-    rows = max(0, (area_bottom - yy) // 30)
+    card(M, y, M + hw, y + bh, "TODAY'S WINS", str(len(done_titles)) if done_titles else None)
+    yy = y + 32
+    rows = max(0, int((y + bh - 8 - yy) // 28))
     if done_titles:
         show = done_titles[:rows] if len(done_titles) <= rows else done_titles[:max(0, rows - 1)]
         for t in show:
-            d.line((lx + 1, yy + 14, lx + 6, yy + 20), fill=BLACK, width=3)
-            d.line((lx + 6, yy + 20, lx + 15, yy + 7), fill=BLACK, width=3)
-            ft = row_font(d, t, col_w - 24)
-            if ft.size > 19:
-                ft = f("semibold", 19)
-            d.text((lx + 24, yy + 2 + (19 - ft.size) // 2), t, font=ft, fill=BLACK)
-            yy += 30
+            x0 = M + PAD
+            d.line((x0 + 1, yy + 12, x0 + 6, yy + 18), fill=BLACK, width=3)
+            d.line((x0 + 6, yy + 18, x0 + 14, yy + 6), fill=BLACK, width=3)
+            ft = row_font(d, t, hw - 2 * PAD - 22)
+            if ft.size > 18:
+                ft = f("semibold", 18)
+            d.text((x0 + 22, yy + 1 + (18 - ft.size) // 2), t, font=ft, fill=BLACK)
+            yy += 28
         if len(done_titles) > len(show):
-            d.text((lx + 24, yy + 2), f"+ {len(done_titles) - len(show)} more", font=T_NOTE, fill=DARK)
+            d.text((M + PAD + 22, yy), f"+ {len(done_titles) - len(show)} more", font=T_NOTE, fill=DARK)
     else:
-        d.text((lx, yy + 2), "Nothing ticked off yet.", font=f("semibold", 19), fill=BLACK)
-        d.text((lx, yy + 30), "Your first win shows up here.", font=T_NOTE, fill=DARK)
+        d.text((M + PAD, yy + 2), "Nothing ticked off yet.", font=f("semibold", 18), fill=BLACK)
+        d.text((M + PAD, yy + 28), "Your first win shows up here.", font=T_NOTE, fill=DARK)
 
-    # right: each list as a mini bar (black part = late)
-    d.text((rx, y), "YOUR LISTS", font=f("semibold", 14), fill=DARK)
-    d.text((rx + col_w - tw(d, "■ late", T_NOTE), y), "■ late", font=T_NOTE, fill=BLACK)
-    yy = y + 24
+    rx = M + hw + GAP
+    card(rx, y, rx + hw, y + bh, "YOUR LISTS", "■ = late")
+    yy = y + 32
     mx = max([len(items) for _, items in lists] + [1])
-    name_w = max([tw(d, n, f("semibold", 17)) for n, _ in lists] + [60]) + 12
+    name_w = max([tw(d, n, f("semibold", 17)) for n, _ in lists] + [50]) + 12
     for name, items in lists:
-        if yy + 26 > area_bottom:
+        if yy + 24 > y + bh - 6:
             break
         lt = sum(1 for i in items if i["due"] and i["due"][0] < today)
-        d.text((rx, yy + 2), name, font=f("semibold", 17), fill=BLACK)
+        x0 = rx + PAD
+        d.text((x0, yy), name, font=f("semibold", 17), fill=BLACK)
         cnt = f"{len(items)}" + (f" · {lt} late" if lt else "")
         cnt_w = tw(d, cnt, T_NOTE)
-        bx0 = rx + name_w
-        bx1 = rx + col_w - cnt_w - 10
+        bx0, bx1 = x0 + name_w, rx + hw - PAD - cnt_w - 10
         full = (bx1 - bx0) * len(items) / mx
         if items:
-            d.rectangle((bx0, yy + 8, bx0 + full, yy + 20), fill=LIGHT)
+            d.rectangle((bx0, yy + 6, bx0 + full, yy + 17), fill=LIGHT)
             if lt:
-                d.rectangle((bx0, yy + 8, bx0 + full * lt / len(items), yy + 20), fill=BLACK)
-        else:
-            d.line((bx0, yy + 14, bx0 + 6, yy + 14), fill=LIGHT, width=2)
-        d.text((rx + col_w - cnt_w, yy + 4), cnt, font=T_NOTE, fill=BLACK if lt else DARK)
-        yy += 30
+                d.rectangle((bx0, yy + 6, bx0 + full * lt / len(items), yy + 17), fill=BLACK)
+        d.text((rx + hw - PAD - cnt_w, yy + 2), cnt, font=T_NOTE, fill=BLACK if lt else DARK)
+        yy += 28
 
     # ---------- the one next move
     wc = week_counts(p)
     move_lbl, move = next_move(p, tr, wc, after_hours)
-    d.rectangle((M, bar_y, W - M, bar_y + bar_h), fill=BLACK)
-    d.text((M + 12, bar_y + 14), move_lbl, font=T_LABEL, fill=LIGHT)
-    tx = M + 24 + tw(d, move_lbl, T_LABEL)
+    d.rounded_rectangle((M, bar_y, W - M, bar_y + bar_h), radius=8, fill=BLACK)
+    d.text((M + 14, bar_y + 13), move_lbl, font=T_LABEL, fill=LIGHT)
+    tx = M + 26 + tw(d, move_lbl, T_LABEL)
     ft = f("bold", 21)
     for s_ in (21, 20, 19, 18, 17, 16, 15, 14):
         ft = f("bold", s_)
-        if tw(d, move, ft) <= W - M - 12 - tx:
+        if tw(d, move, ft) <= W - M - 14 - tx:
             break
-    d.text((tx, bar_y + 10 + (21 - ft.size) // 2), move, font=ft, fill=WHITE)
+    d.text((tx, bar_y + 9 + (21 - ft.size) // 2), move, font=ft, fill=WHITE)
     book.add(img, "Insights")
 
 
