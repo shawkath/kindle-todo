@@ -329,6 +329,13 @@ def track(p):
     done_f = HIST_DIR / "done.json"
     done = load_json(done_f, {})            # {date: [titles you finished]}
     done_today = done.setdefault(today, [])
+    bylist_f = HIST_DIR / "cleared_by_list.json"
+    bylist = load_json(bylist_f, {})        # {date: {list: n}} for "vs last month" per area
+    bl_today = bylist.setdefault(today, {})
+
+    def credit(lst):
+        if lst:
+            bl_today[lst] = bl_today.get(lst, 0) + 1
     pool = p["all"] + p.get("extra", [])
     cur = {}
     for i in pool:
@@ -341,14 +348,18 @@ def track(p):
             if i.get("repeat"):
                 cleared[today] = cleared.get(today, 0) + 1
                 done_today.append(i["title"])
+                credit(i["list"])
             else:
                 moves += 1
-        cur[i["id"]] = {"t": i["title"], "d": due, "moves": moves, "first": old.get("first", today)}
+        cur[i["id"]] = {"t": i["title"], "d": due, "moves": moves, "first": old.get("first", today),
+                        "l": i["list"]}
     if prev and cur:                       # skip the very first run and failed fetches
         gone = [k for k in prev if k not in cur]
         if len(gone) <= max(10, len(prev) // 3):   # a mass "disappearance" = a filter change, not work
             cleared[today] = cleared.get(today, 0) + len(gone)
             done_today.extend(prev[k].get("t", "") for k in gone)
+            for k in gone:
+                credit(prev[k].get("l"))
     cleared = {k: cleared[k] for k in sorted(cleared)[-60:]}
     done = {k: done[k][-40:] for k in sorted(done)[-7:]}
     try:
@@ -356,13 +367,15 @@ def track(p):
         snap_f.write_text(json.dumps(cur))
         clr_f.write_text(json.dumps(cleared))
         done_f.write_text(json.dumps(done))
+        bylist = {k: bylist[k] for k in sorted(bylist)[-70:]}
+        bylist_f.write_text(json.dumps(bylist))
     except Exception as e:
         print("warning: couldn't save history:", e, file=sys.stderr)
     for i in pool:
         rec = cur.get(i.get("id"))
         i["moves"] = rec["moves"] if rec else 0
         i["first_seen"] = rec["first"] if rec else today
-    return {"cleared": cleared, "done": done}
+    return {"cleared": cleared, "done": done, "bylist": bylist}
 
 
 # ------------------------------------------------------------------ the pages
@@ -568,7 +581,7 @@ def page_missed(book, p):
                 for i in g:
                     blocks.append(("row", dict(title=i["title"], meta=meta_for(i, today))))
     else:
-        blocks.append(("note", "Nothing missed. Nice."))
+        blocks.append(("note", "Nothing missed."))
     flow(book, "Missed", blocks, sub=f"{len(missed)} late" if missed else None)
 
 
@@ -652,7 +665,7 @@ def page_list(book, p, name, items):
 def page_insights(book, p, hist, tr, lists):
     """Insights as a tidy grid of cards (easy to follow on e-ink):
         headline
-        [done today] [streak] [this week] [late]
+        [done today] [this week] [late]
         [wins, last 7 days]      [late pile, last 7 days]
         [today's wins]           [your lists]
         ███ one next best move ███"""
@@ -686,15 +699,10 @@ def page_insights(book, p, hist, tr, lists):
             d.text((x1 - PAD - tw(d, note, T_NOTE), y0 + 7), note, font=T_NOTE, fill=BLACK)
 
     # ---------- headline (no card: it's the page's voice)
-    if done_n >= 5:
-        head = f"Strong day: {done_n} done."
-    elif done_n:
-        head = f"{done_n} done today. Keep the momentum."
-    else:
-        head = "Fresh start: one small win gets you going."
+    head = f"{done_n} done today · {week_total} this week · {late} late"   # facts only
     nxt = sorted([i for i in p["today_all"] if i["due"][1] and i["due"][1] > now.time()], key=lambda i: i["due"][1])
     if after_hours:
-        sub = "The day is over. Rest; tomorrow is planned."
+        sub = f"{n_today} task{'s' if n_today != 1 else ''} today · day ended {DAY_END % 12 or 12}{'pm' if DAY_END >= 12 else 'am'}"
     elif nxt:
         sub = f"{n_today} task{'s' if n_today != 1 else ''} today · next fixed: {R.clock(nxt[0]['due'][1])} {nxt[0]['title']}"
     else:
@@ -709,19 +717,15 @@ def page_insights(book, p, hist, tr, lists):
 
     # ---------- 4 stat cards
     sh = 64
-    cw = (W2 - 3 * GAP) / 4
+    cw = (W2 - 2 * GAP) / 3
     T_NUM = f("bold", 28)
     n1 = ("best day!" if done_n and done_n >= best_day else
           f"+{done_n - yday_done} vs yday" if yday_done is not None and done_n > yday_done else "")
-    n2 = ("best ever!" if streak and streak >= best_streak else
-          "keep it today" if streak and done_n == 0 else
-          f"best {best_streak}" if streak else "start one")
     n3 = f"▲ {week_total - prev_week}" if prev_week and week_total > prev_week else ""
     n4 = ""
     if week_ago is not None and week_ago != late:
         n4 = f"▼ {week_ago - late}" if late < week_ago else f"▲ {late - week_ago}"
-    stats = [("DONE TODAY", str(done_n), n1), ("STREAK", f"{streak}d", n2),
-             ("THIS WEEK", str(week_total), n3), ("LATE", str(late), n4)]
+    stats = [("DONE TODAY", str(done_n), n1), ("THIS WEEK", str(week_total), n3), ("LATE", str(late), n4)]
     for k, (lab, num, note) in enumerate(stats):
         x0 = M + k * (cw + GAP)
         card(x0, y, x0 + cw, y + sh, lab)
@@ -764,7 +768,7 @@ def page_insights(book, p, hist, tr, lists):
     if len(known) >= 2 and known[-1] != known[0]:
         trend = f"▼ {known[0] - known[-1]}" if known[-1] < known[0] else f"▲ {known[-1] - known[0]}"
     if late == 0:
-        trend = "clean slate!"
+        trend = "none late"
     chart(M + hw + GAP, "LATE PILE · LAST 7 DAYS", trend, lv)
     y += chh + GAP
 
@@ -790,29 +794,63 @@ def page_insights(book, p, hist, tr, lists):
         if len(done_titles) > len(show):
             d.text((M + PAD + 22, yy), f"+ {len(done_titles) - len(show)} more", font=T_NOTE, fill=DARK)
     else:
-        d.text((M + PAD, yy + 2), "Nothing ticked off yet.", font=f("semibold", 18), fill=BLACK)
-        d.text((M + PAD, yy + 28), "Your first win shows up here.", font=T_NOTE, fill=DARK)
+        d.text((M + PAD, yy + 2), "None yet.", font=f("semibold", 18), fill=DARK)
 
+    # right: productivity per area, last 7 days vs the 7 days before (+ late right now)
     rx = M + hw + GAP
-    card(rx, y, rx + hw, y + bh, "YOUR LISTS", "■ = late")
+    bylist = tr.get("bylist", {})
+    areas = [a.strip() for a in (os.environ.get("PRODUCTIVITY_LISTS") or "Huron,eNoor,BuyPalz,Asana").split(",")
+             if a.strip()]
+
+    def done_in(area, start, end):           # days [start, end] inclusive
+        n = 0
+        for k_, per in bylist.items():
+            if start.isoformat() <= k_ <= end.isoformat():
+                n += sum(v for lst, v in per.items() if lst.lower() == area.lower())
+        return n
+
+    cur_start, prev_end = today - dt.timedelta(days=6), today - dt.timedelta(days=7)
+    prev_start = today - dt.timedelta(days=13)
+    first_track = min((dt.date.fromisoformat(k_) for k_ in bylist), default=today)
+    full_month = first_track <= prev_start + dt.timedelta(days=1)     # need (almost) all of last week
+    note = "vs last week" if full_month else f"% from {first_track + dt.timedelta(days=13):%d %b}".replace(" 0", " ")
+    card(rx, y, rx + hw, y + bh, "DONE 7 DAYS · LATE NOW", note)
+    late_by = {}
+    for i in p["all"] + p.get("extra", []):
+        if i["due"] and i["due"][0] < today:
+            late_by[i["list"].lower()] = late_by.get(i["list"].lower(), 0) + 1
+    rows = [(a, done_in(a, cur_start, today), done_in(a, prev_start, prev_end)) for a in areas]
+    mx = max([c for _, c, _ in rows] + [1])
+    name_w = max([tw(d, a, f("semibold", 17)) for a in areas] + [50]) + 12
     yy = y + 32
-    mx = max([len(items) for _, items in lists] + [1])
-    name_w = max([tw(d, n, f("semibold", 17)) for n, _ in lists] + [50]) + 12
-    for name, items in lists:
+    for a, cur, prev in rows:
         if yy + 24 > y + bh - 6:
             break
-        lt = sum(1 for i in items if i["due"] and i["due"][0] < today)
         x0 = rx + PAD
-        d.text((x0, yy), name, font=f("semibold", 17), fill=BLACK)
-        cnt = f"{len(items)}" + (f" · {lt} late" if lt else "")
+        d.text((x0, yy), a, font=f("semibold", 17), fill=BLACK)
+        if not full_month:
+            chg = ""
+        elif prev == 0:
+            chg = "new" if cur else "–"
+        else:
+            pct = round((cur - prev) * 100 / prev)
+            chg = "same" if pct == 0 else (f"▲ {pct}%" if pct > 0 else f"▼ {-pct}%")
+        chg_w = tw(d, chg, f("bold", 16)) if chg else 0
+        cnt = str(cur)
         cnt_w = tw(d, cnt, T_NOTE)
-        bx0, bx1 = x0 + name_w, rx + hw - PAD - cnt_w - 10
-        full = (bx1 - bx0) * len(items) / mx
-        if items:
-            d.rectangle((bx0, yy + 6, bx0 + full, yy + 17), fill=LIGHT)
-            if lt:
-                d.rectangle((bx0, yy + 6, bx0 + full * lt / len(items), yy + 17), fill=BLACK)
-        d.text((rx + hw - PAD - cnt_w, yy + 2), cnt, font=T_NOTE, fill=BLACK if lt else DARK)
+        right = rx + hw - PAD
+        d.text((right - chg_w, yy + 1), chg, font=f("bold", 16), fill=BLACK)
+        lt = late_by.get(a.lower(), 0)
+        lt_txt = f"{lt} late" if lt else ""
+        lt_x = right - (66 if full_month else 0) - 58           # fixed column for "N late"
+        if lt_txt:
+            d.text((lt_x, yy + 2), lt_txt, font=f("bold", 15), fill=BLACK)
+        cx = lt_x - 10 - cnt_w
+        d.text((cx, yy + 2), cnt, font=T_NOTE, fill=DARK)
+        bx0, bx1 = x0 + name_w, cx - 10
+        if cur and bx1 > bx0:
+            d.rectangle((bx0, yy + 6, bx0 + (bx1 - bx0) * cur / mx, yy + 17),
+                        fill=BLACK if (full_month and prev and cur > prev) else LIGHT)
         yy += 28
 
     # ---------- the one next move
@@ -854,7 +892,7 @@ def next_move(p, tr, wc, after_hours):
                        key=lambda i: (-i["score"], R.when(i)[1]))
         if first:
             return "TOMORROW, START WITH", first[0]["title"]
-        return "NEXT BEST MOVE", "Rest. Tomorrow, pick one task from Missed."
+        return "TOMORROW", "Nothing scheduled"
     pool = [i for i in p["all"] + p.get("extra", []) if i["due"] and i["due"][0] < today]
     avoided = sorted([i for i in pool if i.get("moves", 0) >= 2 or (today - i["due"][0]).days > 30],
                      key=lambda i: -(i.get("moves", 0) * 30 + (today - i["due"][0]).days))
@@ -870,15 +908,15 @@ def next_move(p, tr, wc, after_hours):
         return "CLEAR ONE LATE TASK", p["missed"][0]["title"]
     if p["top3"]:
         return "NEXT BEST MOVE", p["top3"][0]["title"]
-    return "NEXT BEST MOVE", "You're on track. Pick one from Energy."
+    return "NEXT BEST MOVE", "Nothing urgent"
 
 
 def page_night(p, wake, families):
     book = Book(p, families)
     now, today = p["now"], p["today"]
-    img, d = new_page(book, "Today", title="Good night", sub="updates resume " + R.clock(wake.time()))
+    img, d = new_page(book, "Today", title="Tomorrow", sub="updates resume " + R.clock(wake.time()))
     tomorrow = today + dt.timedelta(days=1) if now.hour >= 12 else today
-    d.text((M, TOP_Y + 6), "Rest. Tomorrow is planned.", font=T_BIG, fill=BLACK)
+    d.text((M, TOP_Y + 6), f"{len(p['all'])} open · {len(p['missed'])} late", font=T_BIG, fill=BLACK)
     y = TOP_Y + 60
     due_next = [i for i in p["all"] if i["due"] and i["due"][0] == tomorrow]
     due_next.sort(key=lambda i: (-i["score"], R.when(i)[1]))
@@ -889,11 +927,11 @@ def page_night(p, wake, families):
     if len(due_next) > 5:
         y = more_line(d, y, f"+ {len(due_next) - 5} more tomorrow")
     if not due_next:
-        y = more_line(d, y, "Nothing scheduled. Pick one from Missed in the morning.")
+        y = more_line(d, y, "Nothing scheduled.")
     if p["missed"]:
         y = section_head(d, y + 8, "STILL WAITING", f"{len(p['missed'])} late")
         y = task_row(d, y, p["missed"][0]["title"], meta_for(p["missed"][0], today))
-    d.text((M, BOTTOM - 20), "Updates pause overnight. Tap the middle to update now.", font=T_META_B, fill=DARK)
+    d.text((M, BOTTOM - 20), "Updates paused overnight · tap the middle to update now", font=T_META_B, fill=DARK)
     return img
 
 
@@ -943,10 +981,6 @@ def achievements(cl, today, hist, late):
     streak, best_streak = streaks(cl, today)
     best_day = max(cl.values(), default=0)
     earned, nexts = [], []
-    if streak >= 2:
-        earned.append(f"{streak}-day streak" + (" · record" if streak >= best_streak and streak > 2 else ""))
-    else:
-        nexts.append(("2-day streak", "finish 1 today" if done_n == 0 else "finish 1 tomorrow"))
     if done_n and done_n >= best_day:
         earned.append(f"Best day ever: {done_n}")
     elif best_day:
@@ -997,11 +1031,10 @@ def page_boost(book, p, tr, hist):
     if total:
         head = f"{week} done this week. {total} since {dt.date.fromisoformat(first):%d %b}.".replace(" 0", " ")
     else:
-        head = "Your wins start counting today."
+        head = "0 done so far."
     d.text((M, y), head, font=f("bold", 26) if tw(d, head, f("bold", 26)) <= W2 else row_font(d, head, W2, bold=True),
            fill=BLACK)
-    sub = (f"{done_n} today so far. Every tick adds to the count." if done_n else
-           "First tick of the day is the best one.")
+    sub = f"{done_n} today"
     d.text((M, y + 34), sub, font=T_META, fill=DARK)
     y += 64
 
@@ -1026,7 +1059,7 @@ def page_boost(book, p, tr, hist):
         d.text((px + 11, py + 7), label_, font=T_NOTE, fill=BLACK)
         px += pw + 8
     if not earned and not nexts:
-        d.text((px, py + 6), "Finish one task to earn your first badge.", font=T_NOTE, fill=DARK)
+        d.text((px, py + 6), "None yet.", font=T_NOTE, fill=DARK)
     y += ah + GAP
 
     # ---------- momentum (left) | recent wins (right)
@@ -1086,7 +1119,10 @@ def page_boost(book, p, tr, hist):
     card(rx, y, rx + hw, y + ch, "PERSONAL RECORDS")
     days_sorted = sorted(cl.items())
     best_k, best_v = max(days_sorted, key=lambda kv: kv[1], default=(None, 0))
-    _, best_streak = streaks(cl, today)
+    months = {}
+    for k_, v_ in cl.items():
+        months[k_[:7]] = months.get(k_[:7], 0) + v_
+    best_month = max(months.values(), default=0)
     weeks = {}
     for k_, v_ in cl.items():
         d0 = dt.date.fromisoformat(k_)
@@ -1094,7 +1130,7 @@ def page_boost(book, p, tr, hist):
         weeks[wk] = weeks.get(wk, 0) + v_
     best_week = max(weeks.values(), default=0)
     recs = [("Best day", f"{best_v}" + (f"  ({dt.date.fromisoformat(best_k):%a %d %b})".replace(" 0", " ") if best_k else "")),
-            ("Longest streak", f"{best_streak} day{'s' if best_streak != 1 else ''}"),
+            ("Best month", f"{best_month} wins"),
             ("Best week", f"{best_week} wins"),
             ("All time", f"{total} done")]
     yy = y + 32
@@ -1136,7 +1172,7 @@ def page_boost(book, p, tr, hist):
     d.text((M + 14, bar_y + 14), lbl, font=T_LABEL, fill=LIGHT)
     txt = target["title"] if target else "Anything. Set a timer and start."
     tx = M + 26 + tw(d, lbl, T_LABEL)
-    tail = "  · one more win"
+    tail = ""
     ft = f("bold", 21)
     for s_ in (21, 20, 19, 18, 17, 16, 15, 14):
         ft = f("bold", s_)
