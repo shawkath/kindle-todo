@@ -63,6 +63,9 @@ FOCUS_LISTS = [w.strip() for w in (os.environ.get("FOCUS_LISTS") or "Huron,Perso
 # Asana: open tasks assigned to you, shown as their own list page (sections = Asana projects)
 ASANA_TOKEN = (os.environ.get("ASANA_TOKEN") or "").strip()
 ASANA_LIST = (os.environ.get("ASANA_LIST") or "Asana").strip()
+# only these Asana projects (comma-separated); "all" = every project
+ASANA_PROJECTS = [w.strip() for w in (os.environ.get("ASANA_PROJECTS") or "TrueDime").split(",")
+                  if w.strip() and w.strip().lower() != "all"]
 ASANA_EVERYWHERE = (os.environ.get("ASANA_EVERYWHERE") or "").strip().lower() in ("1", "yes", "true", "on")
 if ASANA_TOKEN and ASANA_LIST.lower() not in [f.lower() for f in FOCUS_LISTS]:
     FOCUS_LISTS.append(ASANA_LIST)
@@ -187,11 +190,14 @@ def asana_get(path, token):
 
 
 def fetch_asana(token, list_name):
-    """Open Asana tasks assigned to you, in every workspace, shaped like TickTick tasks
-    so the rest of the code treats them the same. Section on the Kindle = Asana project."""
+    """Open Asana tasks assigned to you, shaped like TickTick tasks so the rest of the
+    code treats them the same. Only tasks in ASANA_PROJECTS (default: TrueDime) are
+    kept; tasks in other projects or in no project are ignored. If one project is
+    chosen, the Kindle's sections are that project's Asana sections; with several,
+    the sections are the projects."""
     me = asana_get("/users/me?opt_fields=workspaces.name", token)["data"]
     raw = []
-    fields = "name,due_on,due_at,projects.name,tags.name,completed"
+    fields = "name,due_on,due_at,projects.name,memberships.project.name,memberships.section.name,tags.name,completed"
     for ws in me.get("workspaces") or []:
         offset = None
         while True:
@@ -203,18 +209,48 @@ def fetch_asana(token, list_name):
             if not offset:
                 break
 
-    projects = sorted({(t.get("projects") or [{}])[0].get("name") or "" for t in raw} - {""}, key=str.lower)
-    pos = {n: k for k, n in enumerate(projects)}
+    wanted = [w.lower() for w in ASANA_PROJECTS]
+
+    def project_of(t):
+        """First of the task's projects that is wanted ('' if none)."""
+        for pr in t.get("projects") or []:
+            name = (pr.get("name") or "").strip()
+            if not wanted or name.lower() in wanted:
+                return name
+        return ""
+
+    kept = [(t, project_of(t)) for t in raw]
+    kept = [(t, pr) for t, pr in kept if pr]
+    by_section = len({pr for _, pr in kept}) <= 1      # one project: use its Asana sections
+
+    def section_of(t, proj):
+        if not by_section:
+            return proj
+        for m in t.get("memberships") or []:
+            if ((m.get("project") or {}).get("name") or "") == proj:
+                return ((m.get("section") or {}).get("name") or "").strip()
+        return ""
+
+    names = []
+    for t, pr in kept:
+        sec = section_of(t, pr)
+        if sec and sec not in names:
+            names.append(sec)
+    if not by_section:
+        names.sort(key=str.lower)
+    pos = {n: k for k, n in enumerate(names)}
     out = []
-    for t in raw:
-        proj = (t.get("projects") or [{}])[0].get("name") or ""
+    for t, pr in kept:
+        sec = section_of(t, pr)
+        if sec.lower() == "untitled section":
+            sec = ""
         task = {
             "id": "asana:" + str(t.get("gid") or ""),
             "title": t.get("name") or "",
             "priority": 0,
             "tags": [g.get("name") for g in t.get("tags") or [] if g.get("name")],
-            "_section": proj or "No project",
-            "_section_pos": pos.get(proj, len(projects)),
+            "_section": sec or "No section",
+            "_section_pos": pos.get(sec, len(names)),
             "sortOrder": 0,
         }
         if t.get("due_at"):
@@ -224,7 +260,8 @@ def fetch_asana(token, list_name):
             task["isAllDay"] = True
             task["timeZone"] = str(TZ)
         out.append((task, list_name))
-    print(f"asana: {len(out)} open tasks assigned to you")
+    print(f"asana: {len(out)} open tasks assigned to you in {', '.join(ASANA_PROJECTS) or 'all projects'}"
+          f" ({len(raw) - len(out)} in other projects ignored)")
     return out
 
 
