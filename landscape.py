@@ -609,6 +609,8 @@ def page_list(book, p, name, items):
     today = p["today"]
     late = sum(1 for i in items if i["due"] and i["due"][0] < today)
     sub = f"{len(items)} open" + (f" · {late} late" if late else "")
+    if name.lower() == R.ASANA_LIST.lower() and R.ASANA_WS_SHOWN:     # say which Asana workspace this is
+        sub = f"{' + '.join(R.ASANA_WS_SHOWN)} workspace · " + sub
     top5, rest = items[:5], items[5:]
     blocks = []
     if top5:
