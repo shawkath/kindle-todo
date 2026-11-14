@@ -60,6 +60,8 @@ def span(n):
 
 def hm(minutes):
     h, m = divmod(max(0, int(minutes)), 60)
+    if h and not m:
+        return f"{h}h"
     return f"{h}h {m:02d}m" if h else f"{m}m"
 
 
@@ -315,6 +317,9 @@ def track(p):
     snap_f, clr_f = HIST_DIR / "snapshot.json", HIST_DIR / "cleared.json"
     prev = load_json(snap_f, {})
     cleared = load_json(clr_f, {})
+    done_f = HIST_DIR / "done.json"
+    done = load_json(done_f, {})            # {date: [titles you finished]}
+    done_today = done.setdefault(today, [])
     pool = p["all"] + p.get("extra", [])
     cur = {}
     for i in pool:
@@ -326,6 +331,7 @@ def track(p):
         if old.get("d") and due and due > old["d"]:
             if i.get("repeat"):
                 cleared[today] = cleared.get(today, 0) + 1
+                done_today.append(i["title"])
             else:
                 moves += 1
         cur[i["id"]] = {"t": i["title"], "d": due, "moves": moves, "first": old.get("first", today)}
@@ -333,18 +339,21 @@ def track(p):
         gone = [k for k in prev if k not in cur]
         if len(gone) <= max(10, len(prev) // 3):   # a mass "disappearance" = a filter change, not work
             cleared[today] = cleared.get(today, 0) + len(gone)
+            done_today.extend(prev[k].get("t", "") for k in gone)
     cleared = {k: cleared[k] for k in sorted(cleared)[-60:]}
+    done = {k: done[k][-40:] for k in sorted(done)[-7:]}
     try:
         HIST_DIR.mkdir(parents=True, exist_ok=True)
         snap_f.write_text(json.dumps(cur))
         clr_f.write_text(json.dumps(cleared))
+        done_f.write_text(json.dumps(done))
     except Exception as e:
         print("warning: couldn't save history:", e, file=sys.stderr)
     for i in pool:
         rec = cur.get(i.get("id"))
         i["moves"] = rec["moves"] if rec else 0
         i["first_seen"] = rec["first"] if rec else today
-    return {"cleared": cleared}
+    return {"cleared": cleared, "done": done}
 
 
 # ------------------------------------------------------------------ the pages
@@ -632,140 +641,228 @@ def page_list(book, p, name, items):
 
 
 def page_insights(book, p, hist, tr, lists):
+    """Insights: a calm, modern summary you can read in 5 seconds.
+      headline  ->  4 compact stats  ->  2 charts (wins, late pile)
+      ->  done today (names, for the dopamine) | your lists (mini bars)
+      ->  ONE next best move (the only black element)."""
     now, today = p["now"], p["today"]
     img, d = new_page(book, "Insights")
-    y = TOP_Y
-    gap = 10
-    # ---- time: 3 tiles
-    tw_ = (W - 2 * M - 2 * gap) / 3
-    left = day_left(now)
-    planned = planned_minutes(p["today_all"])
-    tiles = [("DAY LEFT", hm(left), f"until {DAY_END % 12 or 12}{'pm' if DAY_END >= 12 else 'am'}"),
-             ("PLANNED TODAY", hm(planned), f"{len(p['today_all'])} tasks"),
-             ("SPARE AFTER THAT", hm(max(0, left - planned)),
-              "over-planned!" if planned > left else "free")]
-    for k, (lab, big, small) in enumerate(tiles):
-        x0 = M + k * (tw_ + gap)
-        d.rectangle((x0, y, x0 + tw_, y + 68), outline=BLACK, width=2)
-        d.text((x0 + 10, y + 6), lab, font=T_LABEL, fill=DARK)
-        d.text((x0 + 10, y + 23), big, font=T_STAT, fill=BLACK)
-        sx = x0 + 18 + tw(d, big, T_STAT)
-        if sx + tw(d, small, T_META_B) <= x0 + tw_ - 6:      # only if it fits inside the tile
-            d.text((sx, y + 34), small, font=T_META_B, fill=BLACK)
-    y += 78
-    nxt = sorted([i for i in p["today_all"] if i["due"][1] and i["due"][1] > now.time()],
-                 key=lambda i: i["due"][1])
-    if nxt:
-        i = nxt[0]
-        mins = (dt.datetime.combine(today, i["due"][1]) - now.replace(tzinfo=None)).total_seconds() / 60
-        y = task_row(d, y, f"Next fixed thing: {R.clock(i['due'][1])}  {i['title']}", f"in {hm(mins)}", marker=None)
-    else:
-        y = task_row(d, y, "No fixed times left today: your time is your own.", "", marker=None)
-    y += 4
-
-    # ---- load (left) + late pile (right)
-    bw_ = (W - 2 * M - gap) / 2
-    bh_ = 128
-    d.rectangle((M, y, M + bw_, y + bh_), outline=BLACK, width=2)
-    d.text((M + 10, y + 6), "THIS WEEK'S LOAD", font=T_LABEL, fill=DARK)
-    wc = week_counts(p)
-    mx = max(1, max(n for _, n in wc))
-    cw = (bw_ - 20) / 7
-    base = y + bh_ - 22
-    for k, (d0, n) in enumerate(wc):
-        bx = M + 10 + k * cw
-        h = 58 * n / mx
-        if k == 0:
-            d.rectangle((bx + 6, base - h, bx + cw - 6, base), fill=BLACK)
-        else:
-            d.rectangle((bx + 6, base - max(h, 1), bx + cw - 6, base), outline=BLACK, width=2, fill=PALE)
-        d.text((bx + cw / 2 - tw(d, str(n), T_META_B) / 2, base - h - 17), str(n), font=T_META_B, fill=BLACK)
-        dn = d0.strftime("%a")
-        d.text((bx + cw / 2 - tw(d, dn, T_META) / 2, base + 3), dn, font=T_META, fill=DARK)
-    heavy = max(wc[1:], key=lambda x: x[1]) if len(wc) > 1 else None
-    light = min(wc[1:], key=lambda x: x[1]) if len(wc) > 1 else None
-    if heavy and light and heavy[1] - light[1] >= 4:
-        tip = f"Move 2 from {heavy[0]:%a} to {light[0]:%a}?"
-        d.text((M + bw_ - 10 - tw(d, tip, T_META_B), y + 6), tip, font=T_META_B, fill=BLACK)
-
-    x2 = M + bw_ + gap
-    d.rectangle((x2, y, x2 + bw_, y + bh_), outline=BLACK, width=2)
-    d.text((x2 + 10, y + 6), "LATE PILE", font=T_LABEL, fill=DARK)
-    late = len(p["missed"])
-    d.text((x2 + 10, y + 22), str(late), font=T_BIG, fill=BLACK)
-    week_ago = (hist or {}).get((today - dt.timedelta(days=7)).isoformat())
-    ax = x2 + 18 + tw(d, str(late), T_BIG)
-    if week_ago is not None:
-        diff = late - week_ago
-        trend = "same as last week" if diff == 0 else (f"▼ {-diff} vs last week" if diff < 0 else f"▲ {diff} vs last week")
-        d.text((ax, y + 26), trend, font=T_META_B, fill=BLACK)
-    streak = R.streak_of(hist or {}, today)
-    if streak:
-        d.text((ax, y + 44), f"not growing for {streak} day{'s' if streak > 1 else ''}", font=T_META, fill=DARK)
-    if p["missed"]:
-        oldest = min(p["missed"], key=lambda i: i["due"][0])
-        age = (today - oldest["due"][0]).days
-        piles = {}
-        for i in p["missed"]:
-            piles[i["list"]] = piles.get(i["list"], 0) + 1
-        top_list, top_n = max(piles.items(), key=lambda kv: kv[1])
-        d.text((x2 + 10, y + 74), f"oldest: {R.late_label(age)} · most in {top_list} ({top_n})", font=T_META_B, fill=BLACK)
-    vals = [(hist or {}).get((today - dt.timedelta(days=6 - k)).isoformat()) for k in range(7)]
-    known = [v for v in vals if v is not None]
-    if known:
-        lo, hi = min(known), max(known)
-        sx = x2 + 10
-        for k, v in enumerate(vals):
-            if v is None:
-                continue
-            h = 6 + (16 * (v - lo) / (hi - lo) if hi > lo else 8)
-            d.rectangle((sx + k * 18, y + bh_ - 8 - h, sx + k * 18 + 12, y + bh_ - 8), fill=BLACK if k == 6 else LIGHT)
-    y += bh_ + 10
-
-    # ---- progress line
+    hist = hist or {}
     cl = tr["cleared"]
-    c_today = cl.get(today.isoformat(), 0)
-    week_start = today - dt.timedelta(days=today.weekday())
-    c_week = sum(v for k, v in cl.items() if k >= week_start.isoformat())
-    best = max(((k, v) for k, v in cl.items() if k >= (today - dt.timedelta(days=6)).isoformat()),
-               key=lambda kv: kv[1], default=None)
-    parts = [f"Cleared today: {c_today}", f"this week: {c_week}"]
-    if best and best[1]:
-        parts.append(f"best day: {dt.date.fromisoformat(best[0]):%a} ({best[1]})")
-    d.rectangle((M, y, W - M, y + 34), outline=BLACK, width=2)
-    d.text((M + 10, y + 7), "PROGRESS", font=T_LABEL, fill=DARK)
-    d.text((M + 22 + tw(d, "PROGRESS", T_LABEL), y + 6), "   ·   ".join(parts), font=T_META_B, fill=BLACK)
-    y += 42
+    done_n = cl.get(today.isoformat(), 0)
+    yday_done = cl.get((today - dt.timedelta(days=1)).isoformat())
+    week_total = sum(cl.get((today - dt.timedelta(days=k)).isoformat(), 0) for k in range(7))
+    prev_week = sum(cl.get((today - dt.timedelta(days=7 + k)).isoformat(), 0) for k in range(7))
+    late = len(p["missed"])
+    week_ago = hist.get((today - dt.timedelta(days=7)).isoformat())
+    left = day_left(now)
+    n_today = len(p["today_all"])
+    after_hours = left <= 0
+    streak, best_streak = streaks(cl, today)
+    best_day = max(cl.values(), default=0)
+    W2 = W - 2 * M
 
-    # ---- avoiding
-    pool = [i for i in p["all"] + p.get("extra", []) if i["due"] and i["due"][0] < today]
-    pool.sort(key=lambda i: (-(i.get("moves", 0) * 30 + (today - i["due"][0]).days)))
-    avoid = [i for i in pool if i.get("moves", 0) > 0 or (today - i["due"][0]).days > 30][:3]
-    if avoid:
-        y = section_head(d, y, "YOU MIGHT BE AVOIDING", "pick one, do 5 minutes")
-        for i in avoid:
-            bits = []
-            if i.get("moves"):
-                bits.append(f"moved {i['moves']}×")
-            bits.append(f"{R.late_label((today - i['due'][0]).days)} late")
-            bits.append(i["list"])
-            y = task_row(d, y, i["title"], " · ".join(bits))
-        y += 4
+    # ---------- headline
+    if done_n >= 5:
+        head = f"Strong day: {done_n} done."
+    elif done_n:
+        head = f"{done_n} done today. Keep the momentum."
+    else:
+        head = "Fresh start: one small win gets you going."
+    nxt = sorted([i for i in p["today_all"] if i["due"][1] and i["due"][1] > now.time()], key=lambda i: i["due"][1])
+    if after_hours:
+        sub = "The day is over. Rest; tomorrow is planned."
+    elif nxt:
+        sub = f"{n_today} task{'s' if n_today != 1 else ''} today · next fixed: {R.clock(nxt[0]['due'][1])} {nxt[0]['title']}"
+    else:
+        sub = f"{n_today} task{'s' if n_today != 1 else ''} today · {hm(left)} of day left · no fixed times"
+    y = TOP_Y
+    hf = f("bold", 24)
+    if tw(d, head, hf) > W2:
+        hf = row_font(d, head, W2, bold=True)
+    d.text((M, y), head, font=hf, fill=BLACK)
+    d.text((M, y + 32), sub, font=row_font(d, sub, W2), fill=DARK)
+    y += 66
 
-    # ---- balance across lists
-    if lists and y + 30 <= BOTTOM:
-        d.text((M, y + 6), "BALANCE", font=T_LABEL, fill=DARK)
-        x = M + 12 + tw(d, "BALANCE", T_LABEL)
-        for name, items in lists:
-            lt = sum(1 for i in items if i["due"] and i["due"][0] < today)
-            chip = f"{name} {len(items)}" + (f" · {lt} late" if lt else "")
-            pw = tw(d, chip, T_META_B) + 16
-            if x + pw > W - M:
-                break
-            d.rectangle((x, y + 2, x + pw, y + 26), outline=BLACK, width=2 if lt else 1)
-            d.text((x + 8, y + 6), chip, font=T_META_B, fill=BLACK)
-            x += pw + 8
+    # ---------- 4 compact stats: label / number + short note on one baseline
+    T_NUM = f("bold", 30)
+    T_NOTE = f("semibold", 15)
+    stats = []
+    n1 = ("best day!" if done_n and done_n >= best_day else
+          f"+{done_n - yday_done} vs yday" if yday_done is not None and done_n > yday_done else "")
+    stats.append(("DONE TODAY", str(done_n), n1))
+    n2 = ("best ever!" if streak and streak >= best_streak else
+          "keep it today" if streak and done_n == 0 else
+          f"best {best_streak}" if streak else "start one")
+    stats.append(("STREAK", f"{streak}d", n2))
+    n3 = f"▲ {week_total - prev_week}" if prev_week and week_total > prev_week else ""
+    stats.append(("THIS WEEK", str(week_total), n3))
+    n4 = ""
+    if week_ago is not None and week_ago != late:
+        n4 = f"▼ {week_ago - late}" if late < week_ago else f"▲ {late - week_ago}"
+    stats.append(("LATE", str(late), n4))
+    cw = W2 / 4
+    for k, (lab, num, note) in enumerate(stats):
+        x0 = M + k * cw + (0 if k == 0 else 14)
+        if k:
+            d.line((M + k * cw, y + 2, M + k * cw, y + 54), fill=LIGHT, width=1)
+        d.text((x0, y), lab, font=f("semibold", 14), fill=DARK)
+        d.text((x0, y + 18), num, font=T_NUM, fill=BLACK)
+        if note:
+            d.text((x0 + tw(d, num, T_NUM) + 8, y + 32), note, font=T_NOTE, fill=BLACK)
+    y += 66
+
+    # ---------- two charts, solid bars, same language
+    ch_gap = 30
+    ch_w = (W2 - ch_gap) / 2
+    ch_h = 96
+
+    def chart(x0, title, note, vals, labels, highlight):
+        d.text((x0, y), title, font=f("semibold", 14), fill=DARK)
+        if note and tw(d, title, f("semibold", 14)) + 16 + tw(d, note, T_NOTE) <= ch_w:
+            d.text((x0 + ch_w - tw(d, note, T_NOTE), y), note, font=T_NOTE, fill=BLACK)
+        known = [v for v in vals if v is not None]
+        mx = max(known) if known else 1
+        mx = mx or 1
+        bw = ch_w / len(vals)
+        base = y + ch_h - 4
+        for k, v in enumerate(vals):
+            bx = x0 + k * bw
+            if v is not None:
+                h = max(3, (ch_h - 50) * v / mx) if v else 2
+                d.rectangle((bx + 8, base - h, bx + bw - 8, base), fill=BLACK if k == highlight else LIGHT)
+                s_ = str(v)
+                d.text((bx + bw / 2 - tw(d, s_, T_NOTE) / 2, base - h - 19), s_, font=T_NOTE,
+                       fill=BLACK)
+            lab = labels[k]
+            d.text((bx + bw / 2 - tw(d, lab, f("semibold", 13)) / 2, base + 3), lab, font=f("semibold", 13),
+                   fill=BLACK if k == highlight else DARK)
+
+    days7 = [today - dt.timedelta(days=6 - k) for k in range(7)]
+    wins = [cl.get(d0.isoformat(), 0) for d0 in days7]
+    chart(M, "WINS · LAST 7 DAYS", f"{sum(wins)} done", wins, [d0.strftime("%a")[:2] for d0 in days7], 6)
+    lv = [hist.get(d0.isoformat()) for d0 in days7]
+    lv[-1] = late
+    known = [v for v in lv if v is not None]
+    trend = ""
+    if len(known) >= 2 and known[-1] != known[0]:
+        trend = f"▼ {known[0] - known[-1]} this week" if known[-1] < known[0] else f"▲ {known[-1] - known[0]} this week"
+    chart(M + ch_w + ch_gap, "LATE PILE · LAST 7 DAYS", trend, lv, [d0.strftime("%a")[:2] for d0 in days7], 6)
+    y += ch_h + 22
+    d.line((M, y, W - M, y), fill=LIGHT, width=1)
+    y += 10
+
+    # ---------- bottom: done today (left) | your lists (right)
+    bar_h = 44
+    bar_y = BOTTOM - bar_h - 2
+    col_w = (W2 - ch_gap) / 2
+    lx, rx = M, M + col_w + ch_gap
+    area_bottom = bar_y - 8
+
+    # left: names of what you finished today
+    done_titles = [t for t in tr.get("done", {}).get(today.isoformat(), []) if t][::-1]
+    d.text((lx, y), "TODAY'S WINS", font=f("semibold", 14), fill=DARK)
+    if done_titles:
+        d.text((lx + col_w - tw(d, str(len(done_titles)), T_NOTE), y), str(len(done_titles)), font=T_NOTE, fill=BLACK)
+    yy = y + 24
+    rows = max(0, (area_bottom - yy) // 30)
+    if done_titles:
+        show = done_titles[:rows] if len(done_titles) <= rows else done_titles[:max(0, rows - 1)]
+        for t in show:
+            d.line((lx + 1, yy + 14, lx + 6, yy + 20), fill=BLACK, width=3)
+            d.line((lx + 6, yy + 20, lx + 15, yy + 7), fill=BLACK, width=3)
+            ft = row_font(d, t, col_w - 24)
+            if ft.size > 19:
+                ft = f("semibold", 19)
+            d.text((lx + 24, yy + 2 + (19 - ft.size) // 2), t, font=ft, fill=BLACK)
+            yy += 30
+        if len(done_titles) > len(show):
+            d.text((lx + 24, yy + 2), f"+ {len(done_titles) - len(show)} more", font=T_NOTE, fill=DARK)
+    else:
+        d.text((lx, yy + 2), "Nothing ticked off yet.", font=f("semibold", 19), fill=BLACK)
+        d.text((lx, yy + 30), "Your first win shows up here.", font=T_NOTE, fill=DARK)
+
+    # right: each list as a mini bar (black part = late)
+    d.text((rx, y), "YOUR LISTS", font=f("semibold", 14), fill=DARK)
+    d.text((rx + col_w - tw(d, "■ late", T_NOTE), y), "■ late", font=T_NOTE, fill=BLACK)
+    yy = y + 24
+    mx = max([len(items) for _, items in lists] + [1])
+    name_w = max([tw(d, n, f("semibold", 17)) for n, _ in lists] + [60]) + 12
+    for name, items in lists:
+        if yy + 26 > area_bottom:
+            break
+        lt = sum(1 for i in items if i["due"] and i["due"][0] < today)
+        d.text((rx, yy + 2), name, font=f("semibold", 17), fill=BLACK)
+        cnt = f"{len(items)}" + (f" · {lt} late" if lt else "")
+        cnt_w = tw(d, cnt, T_NOTE)
+        bx0 = rx + name_w
+        bx1 = rx + col_w - cnt_w - 10
+        full = (bx1 - bx0) * len(items) / mx
+        if items:
+            d.rectangle((bx0, yy + 8, bx0 + full, yy + 20), fill=LIGHT)
+            if lt:
+                d.rectangle((bx0, yy + 8, bx0 + full * lt / len(items), yy + 20), fill=BLACK)
+        else:
+            d.line((bx0, yy + 14, bx0 + 6, yy + 14), fill=LIGHT, width=2)
+        d.text((rx + col_w - cnt_w, yy + 4), cnt, font=T_NOTE, fill=BLACK if lt else DARK)
+        yy += 30
+
+    # ---------- the one next move
+    wc = week_counts(p)
+    move_lbl, move = next_move(p, tr, wc, after_hours)
+    d.rectangle((M, bar_y, W - M, bar_y + bar_h), fill=BLACK)
+    d.text((M + 12, bar_y + 14), move_lbl, font=T_LABEL, fill=LIGHT)
+    tx = M + 24 + tw(d, move_lbl, T_LABEL)
+    ft = f("bold", 21)
+    for s_ in (21, 20, 19, 18, 17, 16, 15, 14):
+        ft = f("bold", s_)
+        if tw(d, move, ft) <= W - M - 12 - tx:
+            break
+    d.text((tx, bar_y + 10 + (21 - ft.size) // 2), move, font=ft, fill=WHITE)
     book.add(img, "Insights")
+
+
+def streaks(cleared, today):
+    """(current, best) runs of days with at least one task done. Today only breaks the
+    run once it's over, so a 0 this morning still shows yesterday's streak."""
+    days = sorted(dt.date.fromisoformat(k) for k, v in cleared.items() if v > 0)
+    best, run, prev = 0, 0, None
+    for d0 in days:
+        run = run + 1 if prev and (d0 - prev).days == 1 else 1
+        best, prev = max(best, run), d0
+    cur, d0 = 0, today if cleared.get(today.isoformat(), 0) > 0 else today - dt.timedelta(days=1)
+    while cleared.get(d0.isoformat(), 0) > 0:
+        cur += 1
+        d0 -= dt.timedelta(days=1)
+    return cur, max(best, cur)
+
+
+def next_move(p, tr, wc, after_hours):
+    """One concrete suggestion, picked from the insights (ADHD: insight -> one action)."""
+    today = p["today"]
+    if after_hours:
+        tomorrow = today + dt.timedelta(days=1)
+        first = sorted([i for i in p["all"] if i["due"] and i["due"][0] == tomorrow],
+                       key=lambda i: (-i["score"], R.when(i)[1]))
+        if first:
+            return "TOMORROW, START WITH", first[0]["title"]
+        return "NEXT BEST MOVE", "Rest. Tomorrow, pick one task from Missed."
+    pool = [i for i in p["all"] + p.get("extra", []) if i["due"] and i["due"][0] < today]
+    avoided = sorted([i for i in pool if i.get("moves", 0) >= 2 or (today - i["due"][0]).days > 30],
+                     key=lambda i: -(i.get("moves", 0) * 30 + (today - i["due"][0]).days))
+    if avoided:
+        return "5 MINUTES ON", avoided[0]["title"]
+    if len(wc) > 2:
+        heavy = max(wc[1:], key=lambda x: x[1])
+        light = min(wc[1:], key=lambda x: x[1])
+        if heavy[1] - light[1] >= 3:
+            return "NEXT BEST MOVE", (f"{heavy[0]:%a} has {heavy[1]} tasks, {light[0]:%a} has {light[1]}: "
+                                      f"move one to {light[0]:%a}")
+    if p["missed"]:
+        return "CLEAR ONE LATE TASK", p["missed"][0]["title"]
+    if p["top3"]:
+        return "NEXT BEST MOVE", p["top3"][0]["title"]
+    return "NEXT BEST MOVE", "You're on track. Pick one from Energy."
 
 
 def page_night(p, wake, families):
