@@ -140,16 +140,24 @@ def new_page(book, family, title=None, sub=None, part=None):
     d.line((M, H - 38, W - M, H - 38), fill=LIGHT, width=1)
     fx = M
     missed_n = len(p["missed"])
+    names = []
     for name in book.families:
         txt = name + (f" {missed_n}" if name == "Missed" and missed_n else "")
         if name == family and part and part[1] > 1:
             txt += f" {part[0]}/{part[1]}"
-        pw = tw(d, txt, T_META_B) + 12
+        names.append((name, txt))
+    ff = T_META_B                                  # shrink the footer a little if the names don't fit
+    for size in (17, 16, 15, 14, 13):
+        ff = f("semibold", size)
+        if sum(tw(d, t, ff) + 14 for _, t in names) <= W - 2 * M:
+            break
+    for name, txt in names:
+        pw = tw(d, txt, ff) + 12
         if name == family:
             d.rectangle((fx, H - 31, fx + pw, H - 8), fill=BLACK)
-            d.text((fx + 6, H - 29), txt, font=T_META_B, fill=WHITE)
+            d.text((fx + 6, H - 29 + (17 - ff.size) // 2), txt, font=ff, fill=WHITE)
         else:
-            d.text((fx + 6, H - 29), txt, font=T_META_B, fill=DARK)
+            d.text((fx + 6, H - 29 + (17 - ff.size) // 2), txt, font=ff, fill=DARK)
         fx += pw + 2
     if R.SYNCED_AT:
         s = "synced " + R.clock(R.SYNCED_AT.time())
@@ -902,13 +910,252 @@ def message_page(now, title, lines):
     return img
 
 
+# ------------------------------------------------------------------ Boost: motivation, zero guilt
+REWARDS = os.environ.get("REWARDS") or "3:tea or coffee break,5:10-minute walk,8:an episode of your show"
+
+
+def rewards_list():
+    out = []
+    for part in REWARDS.split(","):
+        if ":" in part:
+            n, what = part.split(":", 1)
+            try:
+                out.append((int(n), what.strip()))
+            except ValueError:
+                pass
+    return sorted(out)
+
+
+def usual_day(cleared, today):
+    """Your typical number of wins on a day you got going (median of recent active days)."""
+    vals = sorted(v for k, v in cleared.items() if v > 0 and k < today.isoformat())[-14:]
+    if not vals:
+        return 3
+    return max(2, vals[len(vals) // 2])
+
+
+def achievements(cl, today, hist, late):
+    """Earned badges (black) and the next one to unlock (outline)."""
+    total = sum(cl.values())
+    week = sum(cl.get((today - dt.timedelta(days=k)).isoformat(), 0)       # this calendar week (Mon-today)
+               for k in range(today.weekday() + 1))
+    done_n = cl.get(today.isoformat(), 0)
+    streak, best_streak = streaks(cl, today)
+    best_day = max(cl.values(), default=0)
+    earned, nexts = [], []
+    if streak >= 2:
+        earned.append(f"{streak}-day streak" + (" · record" if streak >= best_streak and streak > 2 else ""))
+    else:
+        nexts.append(("2-day streak", "finish 1 today" if done_n == 0 else "finish 1 tomorrow"))
+    if done_n and done_n >= best_day:
+        earned.append(f"Best day ever: {done_n}")
+    elif best_day:
+        nexts.append((f"New best day ({best_day + 1})", f"{best_day + 1 - done_n} to go"))
+    for t in (5, 10, 25, 50, 100):
+        if week >= t:
+            continue
+        nexts.append((f"{t} wins this week", f"{t - week} to go"))
+        break
+    for t in (5, 10, 25, 50, 100):
+        if week >= t and (not [x for x in (5, 10, 25, 50, 100) if t < x <= week]):
+            earned.append(f"{t}+ wins this week")
+    for t in (10, 25, 50, 100, 250, 500, 1000):
+        if total >= t and not [x for x in (10, 25, 50, 100, 250, 500, 1000) if t < x <= total]:
+            earned.append(f"{t}+ tasks done")
+    week_ago = hist.get((today - dt.timedelta(days=7)).isoformat())
+    if week_ago is not None and late < week_ago:
+        earned.append(f"Late pile ▼{week_ago - late}")
+    if late == 0:
+        earned.append("Nothing late")
+    return earned, nexts, total, week
+
+
+def page_boost(book, p, tr, hist):
+    """Boost: your achievements up front (that's the dopamine), then the quickest way
+    to add the next one. No undone lists, no late counts, no comparisons."""
+    now, today = p["now"], p["today"]
+    img, d = new_page(book, "Boost")
+    hist = hist or {}
+    cl = tr["cleared"]
+    done_n = cl.get(today.isoformat(), 0)
+    W2 = W - 2 * M
+    GAP, PAD = 10, 12
+    T_CAP = f("semibold", 14)
+    T_NOTE = f("semibold", 15)
+    earned, nexts, total, week = achievements(cl, today, hist, len(p["missed"]))
+    first = min(cl, default=today.isoformat())
+
+    def card(x0, y0, x1, y1, title=None, note=None):
+        d.rounded_rectangle((x0, y0, x1, y1), radius=8, outline=GREY_LINE, width=2)
+        if title:
+            d.text((x0 + PAD, y0 + 8), title, font=T_CAP, fill=DARK)
+        if note:
+            d.text((x1 - PAD - tw(d, note, T_NOTE), y0 + 7), note, font=T_NOTE, fill=BLACK)
+
+    # ---------- headline: what you've achieved
+    y = TOP_Y - 2
+    if total:
+        head = f"{week} done this week. {total} since {dt.date.fromisoformat(first):%d %b}.".replace(" 0", " ")
+    else:
+        head = "Your wins start counting today."
+    d.text((M, y), head, font=f("bold", 26) if tw(d, head, f("bold", 26)) <= W2 else row_font(d, head, W2, bold=True),
+           fill=BLACK)
+    sub = (f"{done_n} today so far. Every tick adds to the count." if done_n else
+           "First tick of the day is the best one.")
+    d.text((M, y + 34), sub, font=T_META, fill=DARK)
+    y += 64
+
+    # ---------- achievements: earned (black pills) + next to unlock (outline)
+    ah = 78
+    card(M, y, W - M, y + ah, "ACHIEVEMENTS")
+    px, py = M + PAD, y + 32
+    pill_f = f("bold", 17)
+    for t in earned:
+        pw = tw(d, t, pill_f) + 22
+        if px + pw > W - M - PAD:
+            break
+        d.rounded_rectangle((px, py, px + pw, py + 32), radius=16, fill=BLACK)
+        d.text((px + 11, py + 6), t, font=pill_f, fill=WHITE)
+        px += pw + 8
+    for t, hint in nexts:
+        label_ = f"{t} · {hint}"
+        pw = tw(d, label_, T_NOTE) + 22
+        if px + pw > W - M - PAD:
+            break
+        d.rounded_rectangle((px, py, px + pw, py + 32), radius=16, outline=DARK, width=2)
+        d.text((px + 11, py + 7), label_, font=T_NOTE, fill=BLACK)
+        px += pw + 8
+    if not earned and not nexts:
+        d.text((px, py + 6), "Finish one task to earn your first badge.", font=T_NOTE, fill=DARK)
+    y += ah + GAP
+
+    # ---------- momentum (left) | recent wins (right)
+    bar_h = 44
+    bar_y = BOTTOM - bar_h
+    qh = 118                                    # "wins this week" strip
+    ch = bar_y - GAP - qh - GAP - y
+    hw = (W2 - GAP) / 2
+    usual = usual_day(cl, today)
+    steps = max(usual, done_n, 3)
+    card(M, y, M + hw, y + ch, "TODAY")
+    yy = y + 26
+    d.text((M + PAD, yy - 2), str(done_n), font=f("bold", 32), fill=BLACK)
+    d.text((M + PAD + tw(d, str(done_n), f("bold", 32)) + 8, yy + 10),
+           "win" + ("" if done_n == 1 else "s") + " today", font=f("semibold", 18), fill=BLACK)
+    yy += 42
+    seg_w = (hw - 2 * PAD - (steps - 1) * 6) / steps
+    for k in range(steps):
+        sx = M + PAD + k * (seg_w + 6)
+        if k < done_n:
+            d.rounded_rectangle((sx, yy, sx + seg_w, yy + 16), radius=4, fill=BLACK)
+        else:
+            d.rounded_rectangle((sx, yy, sx + seg_w, yy + 16), radius=4, outline=GREY_LINE, width=2)
+    yy += 22
+    # "N more to go": the closest goals, nearest first
+    goals = []
+    if done_n < usual:
+        goals.append((usual - done_n, "a typical good day"))
+    best_day = max(cl.values(), default=0)
+    if best_day and done_n <= best_day:
+        goals.append((best_day + 1 - done_n, "your best day ever"))
+    for t in (5, 10, 25, 50, 100):
+        if week < t:
+            goals.append((t - week, f"{t} wins this week"))
+            break
+    for t in (10, 25, 50, 100, 250, 500, 1000):
+        if total < t:
+            goals.append((t - total, f"{t} tasks done"))
+            break
+    nxt_r = next(((n, w_) for n, w_ in rewards_list() if n > done_n), None)
+    if nxt_r:
+        goals.append((nxt_r[0] - done_n, nxt_r[1]))
+    goals.sort(key=lambda g: g[0])
+    for n_, what in goals[:3]:
+        if yy + 20 > y + ch - 4:
+            break
+        num = f"{n_} more"
+        d.text((M + PAD, yy), num, font=f("bold", 17), fill=BLACK)
+        rest = f"→ {what}"
+        x2 = M + PAD + tw(d, num, f("bold", 17)) + 8
+        d.text((x2, yy), rest, font=row_font(d, rest, M + hw - PAD - x2) if tw(d, rest, f("semibold", 17)) > M + hw - PAD - x2
+               else f("semibold", 17), fill=DARK)
+        yy += 21
+
+    # right: personal records (numbers only, no task names)
+    rx = M + hw + GAP
+    card(rx, y, rx + hw, y + ch, "PERSONAL RECORDS")
+    days_sorted = sorted(cl.items())
+    best_k, best_v = max(days_sorted, key=lambda kv: kv[1], default=(None, 0))
+    _, best_streak = streaks(cl, today)
+    weeks = {}
+    for k_, v_ in cl.items():
+        d0 = dt.date.fromisoformat(k_)
+        wk = d0 - dt.timedelta(days=d0.weekday())
+        weeks[wk] = weeks.get(wk, 0) + v_
+    best_week = max(weeks.values(), default=0)
+    recs = [("Best day", f"{best_v}" + (f"  ({dt.date.fromisoformat(best_k):%a %d %b})".replace(" 0", " ") if best_k else "")),
+            ("Longest streak", f"{best_streak} day{'s' if best_streak != 1 else ''}"),
+            ("Best week", f"{best_week} wins"),
+            ("All time", f"{total} done")]
+    yy = y + 32
+    for lab, val in recs:
+        if yy + 22 > y + ch - 4:
+            break
+        d.text((rx + PAD, yy), lab, font=f("semibold", 17), fill=DARK)
+        d.text((rx + hw - PAD - tw(d, val, f("bold", 17)), yy), val, font=f("bold", 17), fill=BLACK)
+        yy += 27
+    y += ch + GAP
+
+    # ---------- this week's wins, day by day (full width strip)
+    card(M, y, W - M, y + qh, "WINS THIS WEEK", f"{week} so far")
+    week_start = today - dt.timedelta(days=today.weekday())
+    first_day = min((dt.date.fromisoformat(k_) for k_ in cl), default=today)
+    cw_ = (W2 - 2 * PAD) / 7
+    mx = max([cl.get((week_start + dt.timedelta(days=k_)).isoformat(), 0) for k_ in range(7)] + [1])
+    base = y + qh - 22
+    for k_ in range(7):
+        d0 = week_start + dt.timedelta(days=k_)
+        bx = M + PAD + k_ * cw_
+        lab = d0.strftime("%a")
+        is_today = d0 == today
+        d.text((bx + cw_ / 2 - tw(d, lab, f("semibold", 13)) / 2, base + 3), lab, font=f("semibold", 13),
+               fill=BLACK if is_today else DARK)
+        if d0 > today or d0 < first_day:
+            continue
+        v_ = cl.get(d0.isoformat(), 0)
+        h = (qh - 64) * v_ / mx if v_ else 2
+        d.rectangle((bx + 18, base - h, bx + cw_ - 18, base), fill=BLACK if is_today else LIGHT)
+        d.text((bx + cw_ / 2 - tw(d, str(v_), T_NOTE) / 2, base - h - 18), str(v_), font=T_NOTE, fill=BLACK)
+
+    # ---------- sprint bar (the one black bar)
+    untimed = [i for i in p["top3"] + p["also_today"] if not i["due"][1]]
+    pool = p["today_all"] + p["missed"]
+    target = untimed[0] if untimed else (pool[0] if pool else None)
+    d.rounded_rectangle((M, bar_y, W - M, bar_y + bar_h), radius=8, fill=BLACK)
+    lbl = "15-MIN SPRINT"
+    d.text((M + 14, bar_y + 14), lbl, font=T_LABEL, fill=LIGHT)
+    txt = target["title"] if target else "Anything. Set a timer and start."
+    tx = M + 26 + tw(d, lbl, T_LABEL)
+    tail = "  · one more win"
+    ft = f("bold", 21)
+    for s_ in (21, 20, 19, 18, 17, 16, 15, 14):
+        ft = f("bold", s_)
+        if tw(d, txt, ft) <= W - M - 14 - tx:
+            break
+    d.text((tx, bar_y + 10 + (21 - ft.size) // 2), txt, font=ft, fill=WHITE)
+    if tw(d, txt, ft) + tw(d, tail, T_NOTE) <= W - M - 14 - tx:
+        d.text((tx + tw(d, txt, ft), bar_y + 14), tail, font=T_NOTE, fill=LIGHT)
+    book.add(img, "Boost")
+
+
 def render_all(p, hist):
     """All landscape pages. Returns (images, titles)."""
     tr = track(p)
     lists = R.focus_lists(p)
-    families = ["Today", "Week", "Missed", "Energy"] + [n for n, _ in lists] + ["Insights"]
+    families = ["Today", "Boost", "Week", "Missed", "Energy"] + [n for n, _ in lists] + ["Insights"]
     book = Book(p, families)
     page_today(book, p, hist, tr)
+    page_boost(book, p, tr, hist)
     page_week(book, p)
     page_missed(book, p)
     page_energy(book, p)
