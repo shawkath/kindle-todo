@@ -31,6 +31,7 @@ T_STAT = f("bold", 28)
 T_BIG = f("bold", 36)
 ROW_SIZES = [22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12]
 ROW_H = 36
+SUB_H = 30                 # indented sub-task / checklist row
 HEAD_H = 32
 TOP_Y = 66
 BOTTOM = H - 46
@@ -176,8 +177,28 @@ def section_head(d, y, text, right=""):
     return y + HEAD_H
 
 
-def task_row(d, y, title, meta="", marker="check", n=None, bold=False, chip=None):
-    """One task, one line, full text."""
+def task_row(d, y, title, meta="", marker="check", n=None, bold=False, chip=None, indent=False):
+    """One task, one line, full text. indent=True: a sub-task / checklist item under the row above."""
+    if indent:
+        x = M + 36
+        d.line((M + 20, y - 2, M + 20, y + 15), fill=LIGHT, width=2)      # little "└" connector
+        d.line((M + 20, y + 15, M + 30, y + 15), fill=LIGHT, width=2)
+        more = title.startswith("+ ")
+        if not more:
+            d.rectangle((x, y + 8, x + 13, y + 21), outline=DARK, width=2)
+        tx = x + (0 if more else 21)
+        mw = tw(d, meta, T_META) if meta else 0
+        if meta and tw(d, title, f("semibold", 19)) > W - M - mw - 16 - tx:
+            meta, mw = "", 0                                              # keep the title, drop details
+        if meta:
+            d.text((W - M - mw, y + 7), meta, font=T_META, fill=DARK)
+        ft = f("semibold", 19)
+        for s_ in (19, 18, 17, 16, 15, 14, 13, 12):
+            ft = f("semibold", s_)
+            if tw(d, title, ft) <= W - M - mw - 16 - tx:
+                break
+        d.text((tx, y + 4 + (19 - ft.size) // 2), title, font=ft, fill=DARK if more else BLACK)
+        return y + SUB_H
     x = M
     if marker == "check":
         d.rectangle((x, y + 10, x + 15, y + 25), outline=BLACK, width=2)
@@ -253,6 +274,14 @@ def share(sections, space, first_bonus=None):
 
 
 # ------------------------------------------------------------------ flowing (continued) pages
+def block_h(b):
+    if b[0] == "head":
+        return HEAD_H
+    if b[0] == "row":
+        return SUB_H if b[1].get("indent") else ROW_H
+    return 24
+
+
 def flow(book, family, blocks, first_y=TOP_Y, sub=None, top_draw=None, max_pages=LIST_MAX_PAGES):
     """blocks: ("head", text, right) | ("row", kwargs) | ("note", text).
     Splits over continued pages; a section split across pages repeats its heading."""
@@ -261,9 +290,8 @@ def flow(book, family, blocks, first_y=TOP_Y, sub=None, top_draw=None, max_pages
     limit = BOTTOM - 22                    # room for "more on the next page" at the bottom
     while k < len(blocks):
         b = blocks[k]
-        need = (HEAD_H + ROW_H) if b[0] == "head" else (ROW_H if b[0] == "row" else 24)
-        rest_fits = (y + sum(HEAD_H if x[0] == "head" else ROW_H if x[0] == "row" else 24
-                             for x in blocks[k:]) <= BOTTOM)
+        need = (HEAD_H + ROW_H) if b[0] == "head" else block_h(b)
+        rest_fits = (y + sum(block_h(x) for x in blocks[k:]) <= BOTTOM)
         if y + need > (BOTTOM if rest_fits else limit):
             pages.append(cur)
             cur, y = [], TOP_Y
@@ -274,7 +302,7 @@ def flow(book, family, blocks, first_y=TOP_Y, sub=None, top_draw=None, max_pages
         if b[0] == "head":
             last_head = b
         cur.append(b)
-        y += HEAD_H if b[0] == "head" else (ROW_H if b[0] == "row" else 24)
+        y += block_h(b)
         k += 1
     pages.append(cur)
 
@@ -285,7 +313,7 @@ def flow(book, family, blocks, first_y=TOP_Y, sub=None, top_draw=None, max_pages
         start = first_y if max_pages == 1 else TOP_Y
 
         def used(pg):
-            return start + sum(HEAD_H if b[0] == "head" else ROW_H if b[0] == "row" else 24 for b in pg)
+            return start + sum(block_h(b) for b in pg)
         while last and used(last) + 24 > BOTTOM:
             if last.pop()[0] == "row":
                 left += 1
@@ -642,6 +670,26 @@ def page_list(book, p, name, items):
     sub = f"{len(items)} open" + (f" · {late} late" if late else "")
     if name.lower() == R.ASANA_LIST.lower() and R.ASANA_WS_SHOWN:     # say which Asana workspace this is
         sub = f"{' + '.join(R.ASANA_WS_SHOWN)} workspace · " + sub
+    # sub-tasks sit under their parent (indented) instead of as rows of their own
+    ids = {i.get("id") for i in items if i.get("id")}
+    kids = {}
+    for i in items:
+        if i.get("parent_id") in ids:
+            kids.setdefault(i["parent_id"], []).append(i)
+    items = [i for i in items if i.get("parent_id") not in ids]
+    MAX_SUBS = int(os.environ.get("MAX_SUBTASKS") or 4)
+
+    def subs_of(i):
+        out = []
+        for c in sorted(kids.get(i.get("id"), []), key=lambda c: (c["order"], c["title"])):
+            out.append(("row", dict(title=c["title"], meta=meta_for(c, today, where=False), indent=True)))
+        for t in i.get("checklist") or []:
+            out.append(("row", dict(title=t, indent=True)))
+        if len(out) > MAX_SUBS:
+            extra = len(out) - (MAX_SUBS - 1)
+            out = out[:MAX_SUBS - 1] + [("row", dict(title=f"+ {extra} more sub-tasks", indent=True))]
+        return out
+
     top5, rest = items[:5], items[5:]
     blocks = []
     if top5:
@@ -649,6 +697,7 @@ def page_list(book, p, name, items):
         for n, i in enumerate(top5, 1):
             blocks.append(("row", dict(title=i["title"], meta=meta_for(i, today, where="section"),
                                        marker="number", n=n, bold=True)))
+            blocks += subs_of(i)
     groups = {}
     for i in rest:
         groups.setdefault((i["section_pos"], i["section"]), []).append(i)
@@ -657,6 +706,7 @@ def page_list(book, p, name, items):
         blocks.append(("head", (sec or "No section").upper(), str(len(g))))
         for i in g:
             blocks.append(("row", dict(title=i["title"], meta=meta_for(i, today, where=False))))
+            blocks += subs_of(i)
     if not items:
         blocks.append(("note", "Nothing open here."))
     flow(book, name, blocks, sub=sub)

@@ -413,6 +413,9 @@ def plan(tasks, now):
     items = [{"title": " ".join((t.get("title") or "").split()) or "No title",
               "id": t.get("id"),
               "step": first_step(t),
+              "parent_id": t.get("parentId") or None,          # sub-task of another task
+              "checklist": [" ".join((it.get("title") or "").split()) for it in (t.get("items") or [])
+                            if it.get("status", 0) == 0 and (it.get("title") or "").strip()],
               "section": clean(t.get("_section") or ""),
               "section_pos": t.get("_section_pos", 999),
               "order": t.get("sortOrder") or 0,
