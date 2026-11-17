@@ -132,9 +132,19 @@ def new_page(book, family, title=None, sub=None, part=None):
     extra = sub or ""
     if part and part[1] > 1:
         extra = (extra + " · " if extra else "") + f"continued {part[0]}/{part[1]}"
+    # "updated 6:58am" sits just left of the battery corner (the Kindle draws battery +
+    # Wi-Fi in the top-right 130px)
+    BATTERY_ZONE = 200                     # the Kindle's "charging 100% / Wi-Fi on" needs this much
+    synced_x = W - BATTERY_ZONE
+    if R.SYNCED_AT:
+        s_txt = R.SYNCED_AT.strftime("%d %b").lstrip("0") + " " + R.clock(R.SYNCED_AT.time())   # "17 Nov 8:05am"
+        synced_x = W - BATTERY_ZONE - tw(d, s_txt, T_META_B)
+        d.text((synced_x, 21), s_txt, font=T_META_B, fill=DARK)
     if extra:
-        d.text((x, 21), extra, font=T_META_B, fill=BLACK)
-    # top-right 130px stays empty: the Kindle draws battery + Wi-Fi there
+        if x + tw(d, extra, T_META_B) > synced_x - 16:          # never run into "updated"
+            extra = extra.split(" · ")[0]
+        if x + tw(d, extra, T_META_B) <= synced_x - 16:
+            d.text((x, 21), extra, font=T_META_B, fill=BLACK)
     d.line((M, 56, W - M, 56), fill=BLACK, width=2)
 
     # footer: every page family by name, current one inverted
@@ -160,10 +170,7 @@ def new_page(book, family, title=None, sub=None, part=None):
         else:
             d.text((fx + 6, H - 29 + (17 - ff.size) // 2), txt, font=ff, fill=DARK)
         fx += pw + 2
-    if R.SYNCED_AT:
-        s = "synced " + R.clock(R.SYNCED_AT.time())
-        if fx + tw(d, s, T_META_B) + 10 < W - M:
-            d.text((W - M - tw(d, s, T_META_B), H - 29), s, font=T_META_B, fill=BLACK)
+
     return img, d
 
 
